@@ -90,23 +90,23 @@ cd .. && rm -rf gates
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/lifecycle/completion-gate.sh",
-            "timeout": 120000
+            "command": "gates",
+            "timeout": 70000
           }
-        ],
-        "matcher": ""
+        ]
       }
     ]
   }
 }
 ```
 
-`completion-gate.sh` はコード変更を検出し、テスト実行後に `gates` バイナリを呼び出します。`gates` が未インストールの場合はシェルフォールバックで同等の処理を行います。
+Stop hookとして登録すると、`gates` はプロジェクトディレクトリで自動的に実行されます。
 
 ### 直接実行
 
 ```bash
-gates /path/to/project
+gates              # カレントディレクトリを使用
+gates /path/to/project  # ディレクトリを明示指定
 ```
 
 出力がなければ全ゲート通過。失敗時はblock JSONを出力します。
@@ -156,17 +156,6 @@ project-root/
 ├── tsconfig.json
 └── src/
 ```
-
-## シェルフォールバック
-
-`completion-gate.sh` は `gates` バイナリが未インストールの場合、同等のゲートチェックをシェルで実行します。
-
-| 機能           | Rust バイナリ      | シェルフォールバック |
-| -------------- | ------------------ | -------------------- |
-| 並列実行       | OSスレッド         | 逐次実行             |
-| タイムアウト   | 60秒（内蔵）       | timeout/gtimeout     |
-| 出力サニタイズ | ANSIエスケープ除去 | なし                 |
-| 出力切り詰め   | 末尾50行           | tail -50             |
 
 ## ライセンス
 

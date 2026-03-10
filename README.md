@@ -90,23 +90,23 @@ Add to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/lifecycle/completion-gate.sh",
-            "timeout": 120000
+            "command": "gates",
+            "timeout": 70000
           }
-        ],
-        "matcher": ""
+        ]
       }
     ]
   }
 }
 ```
 
-`completion-gate.sh` detects code changes, runs tests, then invokes the `gates` binary. If `gates` is not installed, it falls back to an equivalent shell implementation.
+When registered as a Stop hook, `gates` runs in the project directory automatically.
 
 ### Direct Execution
 
 ```bash
-gates /path/to/project
+gates              # uses current directory
+gates /path/to/project  # explicit directory
 ```
 
 No output means all gates passed. On failure, block JSON is printed to stdout:
@@ -156,17 +156,6 @@ project-root/
 ├── tsconfig.json
 └── src/
 ```
-
-## Shell Fallback
-
-`completion-gate.sh` runs equivalent gate checks in shell when the `gates` binary is not installed.
-
-| Feature      | Rust Binary         | Shell Fallback   |
-| ------------ | ------------------- | ---------------- |
-| Parallelism  | OS threads          | Sequential       |
-| Timeout      | 60s (built-in)      | timeout/gtimeout |
-| Sanitization | ANSI escape removal | None             |
-| Truncation   | Last 50 lines       | tail -50         |
 
 ## License
 

@@ -77,12 +77,13 @@ fn run(project_dir: &Path) -> Option<String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 2 {
-        eprintln!("usage: gates <project_dir>");
+    if args.len() > 2 {
+        eprintln!("usage: gates [project_dir]");
         std::process::exit(1);
     }
 
-    let project_dir = Path::new(&args[1]);
+    let dir = args.get(1).map(String::as_str).unwrap_or(".");
+    let project_dir = Path::new(dir);
     if !project_dir.is_dir() {
         eprintln!("gates: not a directory: {}", project_dir.display());
         std::process::exit(1);
