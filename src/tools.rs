@@ -92,7 +92,10 @@ fn kill_process_group(pid: u32) {
         return;
     }
     let Ok(pid_i32) = i32::try_from(pid) else {
-        eprintln!("gates: pid {} exceeds i32::MAX, cannot kill process group", pid);
+        eprintln!(
+            "gates: pid {} exceeds i32::MAX, cannot kill process group",
+            pid
+        );
         return;
     };
     // Safety: kill(-pid) sends SIGKILL to the process group led by `pid`.
@@ -153,11 +156,7 @@ fn run_command(name: &'static str, mut cmd: Command, timeout: Duration) -> ToolR
             ToolResult::skipped(name)
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            eprintln!(
-                "gates: {} timed out after {}s",
-                name,
-                timeout.as_secs()
-            );
+            eprintln!("gates: {} timed out after {}s", name, timeout.as_secs());
             kill_process_group(pid);
             // Brief wait for child cleanup after SIGKILL
             let _ = rx.recv_timeout(Duration::from_secs(2));

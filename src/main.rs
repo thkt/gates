@@ -61,10 +61,7 @@ fn run(project_dir: &Path) -> Option<String> {
     let reason = if output.is_empty() {
         format!("{} failed.", first_failure.name)
     } else {
-        format!(
-            "{} failed. Fix the issues:\n{}",
-            first_failure.name, output
-        )
+        format!("{} failed. Fix the issues:\n{}", first_failure.name, output)
     };
 
     let block = serde_json::json!({
