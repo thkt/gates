@@ -1,0 +1,11 @@
+{
+  "name": "gates",
+  "version": "0.2.0",
+  "description": "Stop hook for Claude Code - parallel quality gates (knip, tsgo, madge)",
+  "author": {
+    "name": "thkt",
+    "url": "https://github.com/thkt"
+  },
+  "repository": "https://github.com/thkt/gates",
+  "license": "MIT"
+}

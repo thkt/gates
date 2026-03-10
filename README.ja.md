@@ -49,6 +49,21 @@ Claude Codeの[completion hook](https://docs.anthropic.com/en/docs/claude-code/h
 
 ## インストール
 
+### Claude Code Plugin（推奨）
+
+バイナリのインストールとhookの登録が自動で行われます。
+
+```bash
+claude plugins marketplace add github:thkt/gates
+claude plugins install gates
+```
+
+バイナリが未インストールの場合、同梱のインストーラを実行してください。
+
+```bash
+~/.claude/plugins/cache/gates/gates/*/hooks/install.sh
+```
+
 ### Homebrew
 
 ```bash

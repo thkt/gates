@@ -1,0 +1,13 @@
+{
+  "name": "gates",
+  "owner": {
+    "name": "thkt"
+  },
+  "plugins": [
+    {
+      "name": "gates",
+      "source": "./",
+      "description": "Stop hook - parallel quality gates (knip, tsgo, madge)"
+    }
+  ]
+}

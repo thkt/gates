@@ -1,0 +1,16 @@
+{
+  "description": "Parallel quality gates for Claude Code completion",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/wrapper.sh gates",
+            "timeout": 70000
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -49,6 +49,21 @@ Missing tools are silently skipped.
 
 ## Installation
 
+### Claude Code Plugin (recommended)
+
+Installs the binary and registers the Stop hook automatically.
+
+```bash
+claude plugins marketplace add github:thkt/gates
+claude plugins install gates
+```
+
+If the binary is not installed, run the bundled installer:
+
+```bash
+~/.claude/plugins/cache/gates/gates/*/hooks/install.sh
+```
+
 ### Homebrew
 
 ```bash
