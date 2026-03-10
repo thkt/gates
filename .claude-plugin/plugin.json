@@ -1,6 +1,6 @@
 {
   "name": "gates",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Stop hook for Claude Code - parallel quality gates (knip, tsgo, madge)",
   "author": {
     "name": "thkt",
