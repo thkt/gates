@@ -172,6 +172,15 @@ project-root/
 └── src/
 ```
 
+## 関連ツール
+
+| ツール | Hook | タイミング | 役割 |
+| --- | --- | --- | --- |
+| [guardrails](https://github.com/thkt/guardrails) | PreToolUse | Write/Edit 前 | リント + セキュリティチェック |
+| [formatter](https://github.com/thkt/formatter) | PostToolUse | Write/Edit 後 | 自動コード整形 |
+| [reviews](https://github.com/thkt/reviews) | PreToolUse | レビュー系 Skill 実行時 | 静的解析コンテキスト提供 |
+| **gates** | Stop | エージェント完了時 | 品質ゲート (knip/tsgo/madge) |
+
 ## ライセンス
 
 MIT
