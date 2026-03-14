@@ -11,7 +11,7 @@ const MAX_OUTPUT_LINES: usize = 50;
 
 #[derive(Debug)]
 pub enum GateOutcome {
-    Passed(String),
+    Passed,
     Failed(String),
     Skipped,
 }
@@ -19,6 +19,7 @@ pub enum GateOutcome {
 #[derive(Debug)]
 pub struct ToolResult {
     pub name: &'static str,
+    pub hint: &'static str,
     pub outcome: GateOutcome,
 }
 
@@ -26,6 +27,7 @@ impl ToolResult {
     pub fn skipped(name: &'static str) -> Self {
         Self {
             name,
+            hint: "",
             outcome: GateOutcome::Skipped,
         }
     }
@@ -40,8 +42,8 @@ impl ToolResult {
 
     pub fn output(&self) -> &str {
         match &self.outcome {
-            GateOutcome::Passed(s) | GateOutcome::Failed(s) => s,
-            GateOutcome::Skipped => "",
+            GateOutcome::Failed(s) => s,
+            GateOutcome::Passed | GateOutcome::Skipped => "",
         }
     }
 }
@@ -50,6 +52,7 @@ pub struct GateDefinition {
     pub name: &'static str,
     pub command: &'static str,
     pub args: &'static [&'static str],
+    pub hint: &'static str,
     pub condition: fn(&ProjectInfo) -> bool,
 }
 
@@ -58,18 +61,21 @@ pub const GATES: &[GateDefinition] = &[
         name: "knip",
         command: "knip",
         args: &[],
+        hint: "Remove unused exports and dependencies.",
         condition: |p| p.has_package_json,
     },
     GateDefinition {
         name: "tsgo",
         command: "tsgo",
         args: &[],
+        hint: "Fix type errors.",
         condition: |p| p.has_tsconfig,
     },
     GateDefinition {
         name: "madge",
         command: "madge",
         args: &["--circular", "--extensions", "ts,tsx", "src/"],
+        hint: "Break circular import dependencies.",
         condition: |p| p.has_package_json && p.root.join("src").is_dir(),
     },
 ];
@@ -116,7 +122,15 @@ fn run_command(name: &'static str, mut cmd: Command, timeout: Duration) -> ToolR
     let child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("gates: {} spawn error: {}", name, e);
+            match e.kind() {
+                std::io::ErrorKind::NotFound => {}
+                std::io::ErrorKind::PermissionDenied => {
+                    eprintln!("gates: {} binary found but not executable: {}", name, e);
+                }
+                _ => {
+                    eprintln!("gates: {} spawn error: {}", name, e);
+                }
+            }
             return ToolResult::skipped(name);
         }
     };
@@ -145,11 +159,15 @@ fn run_command(name: &'static str, mut cmd: Command, timeout: Duration) -> ToolR
             let text = truncated.trim().to_string();
 
             let outcome = if output.status.success() {
-                GateOutcome::Passed(text)
+                GateOutcome::Passed
             } else {
                 GateOutcome::Failed(text)
             };
-            ToolResult { name, outcome }
+            ToolResult {
+                name,
+                hint: "",
+                outcome,
+            }
         }
         Ok(Err(e)) => {
             eprintln!("gates: {} output read error: {}", name, e);
@@ -177,7 +195,9 @@ pub fn run_gate(gate: &GateDefinition, project: &ProjectInfo) -> ToolResult {
     let bin = resolve::resolve_bin(gate.command, &project.root);
     let mut cmd = Command::new(&bin);
     cmd.args(gate.args).current_dir(&project.root);
-    run_command(gate.name, cmd, GATE_TIMEOUT)
+    let mut result = run_command(gate.name, cmd, GATE_TIMEOUT);
+    result.hint = gate.hint;
+    result
 }
 
 #[cfg(test)]
@@ -219,6 +239,7 @@ mod tests {
             name: "missing",
             command: "nonexistent-command-99999",
             args: &[],
+            hint: "",
             condition: |_| true,
         };
         let project = test_project(true, true);
@@ -255,8 +276,7 @@ mod tests {
         let mut cmd = Command::new("echo");
         cmd.arg("hello");
         let result = run_command("echo-test", cmd, Duration::from_secs(5));
-        assert!(matches!(result.outcome, GateOutcome::Passed(_)));
-        assert!(result.output().contains("hello"));
+        assert!(matches!(result.outcome, GateOutcome::Passed));
     }
 
     #[test]

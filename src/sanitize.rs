@@ -23,7 +23,13 @@ pub fn tail_lines(s: &str, max_lines: usize) -> String {
     if lines.len() <= max_lines {
         return s.to_string();
     }
-    lines[lines.len() - max_lines..].join("\n")
+    let skipped = lines.len() - max_lines;
+    format!(
+        "[...truncated {} lines, showing last {}]\n{}",
+        skipped,
+        max_lines,
+        lines[lines.len() - max_lines..].join("\n")
+    )
 }
 
 #[cfg(test)]
@@ -66,9 +72,12 @@ mod tests {
     }
 
     #[test]
-    fn tail_keeps_last_n_lines() {
+    fn tail_keeps_last_n_lines_with_indicator() {
         let input = "1\n2\n3\n4\n5";
-        assert_eq!(tail_lines(input, 3), "3\n4\n5");
+        assert_eq!(
+            tail_lines(input, 3),
+            "[...truncated 2 lines, showing last 3]\n3\n4\n5"
+        );
     }
 
     #[test]
@@ -80,5 +89,16 @@ mod tests {
     #[test]
     fn tail_single_line() {
         assert_eq!(tail_lines("hello", 50), "hello");
+    }
+
+    #[test]
+    fn tail_empty_string() {
+        assert_eq!(tail_lines("", 5), "");
+    }
+
+    #[test]
+    fn tail_exact_limit() {
+        let input = "1\n2\n3";
+        assert_eq!(tail_lines(input, 3), "1\n2\n3");
     }
 }

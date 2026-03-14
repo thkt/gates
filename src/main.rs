@@ -9,6 +9,46 @@ mod traverse;
 
 use std::path::Path;
 
+fn format_failures(failures: &[&tools::ToolResult]) -> String {
+    if failures.len() == 1 {
+        let f = failures[0];
+        let output = f.output();
+        let action = if f.hint.is_empty() {
+            "Fix the issues:"
+        } else {
+            f.hint
+        };
+        return if output.is_empty() {
+            format!("{} failed.", f.name)
+        } else {
+            format!("{} failed. {}\n\n{}", f.name, action, output)
+        };
+    }
+
+    let sections: Vec<String> = failures
+        .iter()
+        .map(|f| {
+            let output = f.output();
+            let hint = if f.hint.is_empty() {
+                "Fix the issues:"
+            } else {
+                f.hint
+            };
+            if output.is_empty() {
+                format!("## {}\n{}", f.name, hint)
+            } else {
+                format!("## {}\n{}\n\n{}", f.name, hint, output)
+            }
+        })
+        .collect();
+
+    format!(
+        "{} gates failed. Fix all issues:\n\n{}",
+        failures.len(),
+        sections.join("\n\n")
+    )
+}
+
 fn run(project_dir: &Path) -> Option<String> {
     let config = config::GatesConfig::load(project_dir);
     let project = project::ProjectInfo::detect(project_dir);
@@ -55,15 +95,12 @@ fn run(project_dir: &Path) -> Option<String> {
         );
     }
 
-    let first_failure = results.iter().find(|r| r.is_failure())?;
+    let failures: Vec<_> = results.iter().filter(|r| r.is_failure()).collect();
+    if failures.is_empty() {
+        return None;
+    }
 
-    let output = first_failure.output();
-    let reason = if output.is_empty() {
-        format!("{} failed.", first_failure.name)
-    } else {
-        format!("{} failed. Fix the issues:\n{}", first_failure.name, output)
-    };
-
+    let reason = format_failures(&failures);
     let block = serde_json::json!({
         "decision": "block",
         "reason": reason
@@ -106,6 +143,115 @@ mod tests {
             fs::write(tmp.join(file), "{}").unwrap();
         }
         tmp
+    }
+
+    #[test]
+    fn format_single_failure_with_output() {
+        let r = tools::ToolResult {
+            name: "knip",
+            hint: "Remove unused exports and dependencies.",
+            outcome: tools::GateOutcome::Failed("Unused export: src/foo.ts".into()),
+        };
+        let result = format_failures(&[&r]);
+        assert_eq!(
+            result,
+            "knip failed. Remove unused exports and dependencies.\n\nUnused export: src/foo.ts"
+        );
+    }
+
+    #[test]
+    fn format_single_failure_without_output() {
+        let r = tools::ToolResult {
+            name: "knip",
+            hint: "Remove unused exports and dependencies.",
+            outcome: tools::GateOutcome::Failed(String::new()),
+        };
+        let result = format_failures(&[&r]);
+        assert_eq!(result, "knip failed.");
+    }
+
+    #[test]
+    fn format_single_failure_fallback_hint() {
+        let r = tools::ToolResult {
+            name: "custom",
+            hint: "",
+            outcome: tools::GateOutcome::Failed("error output".into()),
+        };
+        let result = format_failures(&[&r]);
+        assert_eq!(result, "custom failed. Fix the issues:\n\nerror output");
+    }
+
+    #[test]
+    fn format_multiple_failures() {
+        let r1 = tools::ToolResult {
+            name: "knip",
+            hint: "Remove unused exports and dependencies.",
+            outcome: tools::GateOutcome::Failed("Unused export".into()),
+        };
+        let r2 = tools::ToolResult {
+            name: "tsgo",
+            hint: "Fix type errors.",
+            outcome: tools::GateOutcome::Failed("TS2345: type error".into()),
+        };
+        let result = format_failures(&[&r1, &r2]);
+        assert_eq!(
+            result,
+            "2 gates failed. Fix all issues:\n\n\
+             ## knip\n\
+             Remove unused exports and dependencies.\n\n\
+             Unused export\n\n\
+             ## tsgo\n\
+             Fix type errors.\n\n\
+             TS2345: type error"
+        );
+    }
+
+    #[test]
+    fn format_multiple_failures_without_output() {
+        let r1 = tools::ToolResult {
+            name: "knip",
+            hint: "Remove unused exports and dependencies.",
+            outcome: tools::GateOutcome::Failed(String::new()),
+        };
+        let r2 = tools::ToolResult {
+            name: "tsgo",
+            hint: "Fix type errors.",
+            outcome: tools::GateOutcome::Failed(String::new()),
+        };
+        let result = format_failures(&[&r1, &r2]);
+        assert_eq!(
+            result,
+            "2 gates failed. Fix all issues:\n\n\
+             ## knip\n\
+             Remove unused exports and dependencies.\n\n\
+             ## tsgo\n\
+             Fix type errors."
+        );
+    }
+
+    #[test]
+    fn format_multiple_failures_mixed_hints() {
+        let r1 = tools::ToolResult {
+            name: "custom",
+            hint: "",
+            outcome: tools::GateOutcome::Failed("error".into()),
+        };
+        let r2 = tools::ToolResult {
+            name: "knip",
+            hint: "Remove unused exports and dependencies.",
+            outcome: tools::GateOutcome::Failed("Unused export".into()),
+        };
+        let result = format_failures(&[&r1, &r2]);
+        assert_eq!(
+            result,
+            "2 gates failed. Fix all issues:\n\n\
+             ## custom\n\
+             Fix the issues:\n\n\
+             error\n\n\
+             ## knip\n\
+             Remove unused exports and dependencies.\n\n\
+             Unused export"
+        );
     }
 
     #[test]
