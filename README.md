@@ -172,14 +172,23 @@ project-root/
 └── src/
 ```
 
-## Related Tools
+## Companion Tools
 
-| Tool                                             | Hook        | Timing                 | Role                              |
-| ------------------------------------------------ | ----------- | ---------------------- | --------------------------------- |
-| [guardrails](https://github.com/thkt/guardrails) | PreToolUse  | Before Write/Edit      | Lint + security checks            |
-| [formatter](https://github.com/thkt/formatter)   | PostToolUse | After Write/Edit       | Auto code formatting              |
-| [reviews](https://github.com/thkt/reviews)       | PreToolUse  | Review Skill execution | Static analysis context           |
-| **gates**                                        | Stop        | Agent completion       | Quality gates (knip, tsgo, madge) |
+This tool is part of a 4-tool quality pipeline for Claude Code. Each covers a
+different phase — install the full suite for comprehensive coverage:
+
+```bash
+brew install thkt/tap/guardrails thkt/tap/formatter thkt/tap/reviews thkt/tap/gates
+```
+
+| Tool                                             | Hook        | Timing            | Role                              |
+| ------------------------------------------------ | ----------- | ----------------- | --------------------------------- |
+| [guardrails](https://github.com/thkt/guardrails) | PreToolUse  | Before Write/Edit | Lint + security checks            |
+| [formatter](https://github.com/thkt/formatter)   | PostToolUse | After Write/Edit  | Auto code formatting              |
+| [reviews](https://github.com/thkt/reviews)       | PreToolUse  | Before Skill      | Static analysis context injection |
+| **gates**                                        | Stop        | Agent completion  | Quality gates (knip, tsgo, madge) |
+
+See [thkt/tap](https://github.com/thkt/homebrew-tap) for setup details.
 
 ## License
 
