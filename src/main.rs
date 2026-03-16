@@ -393,7 +393,10 @@ mod tests {
     // Phase integration: all pass + no transcript → review block
     #[test]
     fn all_pass_without_transcript_returns_review_block() {
-        let tmp = setup_project(r#"{"gates":{"lint":true},"review":true}"#, &["package.json"]);
+        let tmp = setup_project(
+            r#"{"gates":{"lint":true},"review":true}"#,
+            &["package.json"],
+        );
         fs::write(
             tmp.join("package.json"),
             r#"{"scripts":{"lint":"eslint ."}}"#,
@@ -427,7 +430,10 @@ mod tests {
     // Phase integration: all pass + transcript with AllPassed → allow
     #[test]
     fn all_pass_after_review_allows_completion() {
-        let tmp = setup_project(r#"{"gates":{"lint":true},"review":true}"#, &["package.json"]);
+        let tmp = setup_project(
+            r#"{"gates":{"lint":true},"review":true}"#,
+            &["package.json"],
+        );
         fs::write(
             tmp.join("package.json"),
             r#"{"scripts":{"lint":"eslint ."}}"#,
@@ -465,10 +471,7 @@ mod tests {
     // CQ-1: $TEST_CMD legacy mode → single gate, script detection skipped
     #[test]
     fn legacy_test_cmd_runs_single_gate() {
-        let tmp = setup_project(
-            r#"{"gates":{"lint":true,"test":true}}"#,
-            &["package.json"],
-        );
+        let tmp = setup_project(r#"{"gates":{"lint":true,"test":true}}"#, &["package.json"]);
         fs::write(
             tmp.join("package.json"),
             r#"{"scripts":{"lint":"eslint .","test":"vitest"}}"#,
@@ -489,7 +492,10 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
         assert_eq!(json["decision"], "block");
         let reason = json["reason"].as_str().unwrap();
-        assert!(reason.contains("legacy-fail"), "should contain legacy test output");
+        assert!(
+            reason.contains("legacy-fail"),
+            "should contain legacy test output"
+        );
         // Should NOT contain lint output (script gates are skipped in legacy mode)
         assert!(
             !reason.contains("lint"),
@@ -521,6 +527,9 @@ mod tests {
         assert_eq!(json["decision"], "block");
         let reason = json["reason"].as_str().unwrap();
         assert!(reason.contains("lint"), "reason should mention lint");
-        assert!(reason.contains("Banned"), "fix prompt should include footer");
+        assert!(
+            reason.contains("Banned"),
+            "fix prompt should include footer"
+        );
     }
 }

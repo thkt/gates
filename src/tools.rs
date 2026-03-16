@@ -379,7 +379,12 @@ fn run_command_with_label(
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             if let Some(l) = label {
-                eprintln!("gates: {} timed out after {}s (cmd: {})", name, timeout.as_secs(), l);
+                eprintln!(
+                    "gates: {} timed out after {}s (cmd: {})",
+                    name,
+                    timeout.as_secs(),
+                    l
+                );
             } else {
                 eprintln!("gates: {} timed out after {}s", name, timeout.as_secs());
             }
@@ -520,7 +525,10 @@ mod tests {
         let type_result = results.iter().find(|r| r.name == "type-check").unwrap();
         let test_result = results.iter().find(|r| r.name == "test").unwrap();
         assert!(type_result.is_failure());
-        assert!(test_result.is_skipped(), "test should be skipped when type-check fails");
+        assert!(
+            test_result.is_skipped(),
+            "test should be skipped when type-check fails"
+        );
     }
 
     // T-026: nr 未インストール → nr-based gates not generated, env override still works
@@ -530,7 +538,10 @@ mod tests {
 
         // nr absent → no script gates without override
         let gates = detect_script_gates_inner(&no_overrides(), &tmp, false);
-        assert!(gates.is_empty(), "no gates should be generated without nr and no overrides");
+        assert!(
+            gates.is_empty(),
+            "no gates should be generated without nr and no overrides"
+        );
 
         // env override bypasses nr check
         let overrides = EnvOverrides {

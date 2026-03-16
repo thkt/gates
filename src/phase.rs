@@ -125,7 +125,10 @@ mod tests {
 "#,
         )
         .unwrap();
-        assert_eq!(detect_previous_block(&transcript), PreviousBlock::GateFailed);
+        assert_eq!(
+            detect_previous_block(&transcript),
+            PreviousBlock::GateFailed
+        );
     }
 
     // T-014: transcript に "All gates passed" block あり
@@ -141,10 +144,7 @@ mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(
-            detect_previous_block(&transcript),
-            PreviousBlock::AllPassed
-        );
+        assert_eq!(detect_previous_block(&transcript), PreviousBlock::AllPassed);
     }
 
     // T-015: transcript に gates block なし
@@ -159,10 +159,7 @@ mod tests {
 "#,
         )
         .unwrap();
-        assert_eq!(
-            detect_previous_block(&transcript),
-            PreviousBlock::NotFound
-        );
+        assert_eq!(detect_previous_block(&transcript), PreviousBlock::NotFound);
     }
 
     // T-016: transcript 読み失敗 → NotFound (fail-open)
