@@ -80,6 +80,202 @@ pub const GATES: &[GateDefinition] = &[
     },
 ];
 
+pub struct ScriptGate {
+    pub name: &'static str,
+    pub command: String,
+    pub hint: &'static str,
+}
+
+#[derive(Default)]
+pub struct EnvOverrides {
+    pub lint_cmd: Option<String>,
+    pub type_cmd: Option<String>,
+    pub unit_cmd: Option<String>,
+    pub test_cmd: Option<String>,
+}
+
+impl EnvOverrides {
+    pub fn from_env() -> Self {
+        Self {
+            lint_cmd: std::env::var("LINT_CMD").ok().filter(|s| !s.is_empty()),
+            type_cmd: std::env::var("TYPE_CMD").ok().filter(|s| !s.is_empty()),
+            unit_cmd: std::env::var("UNIT_CMD").ok().filter(|s| !s.is_empty()),
+            test_cmd: std::env::var("TEST_CMD").ok().filter(|s| !s.is_empty()),
+        }
+    }
+}
+
+fn has_nr_in_path(path_override: &str) -> bool {
+    if path_override.is_empty() {
+        std::process::Command::new("nr")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    } else {
+        std::path::Path::new(path_override).join("nr").is_file()
+    }
+}
+
+pub fn detect_script_gates_with_overrides(
+    overrides: &EnvOverrides,
+    project_dir: &std::path::Path,
+) -> Vec<ScriptGate> {
+    let nr_available = has_nr_in_path("");
+    detect_script_gates_inner(overrides, project_dir, nr_available)
+}
+
+fn detect_script_gates_inner(
+    overrides: &EnvOverrides,
+    project_dir: &std::path::Path,
+    nr_available: bool,
+) -> Vec<ScriptGate> {
+    let mut gates = Vec::new();
+
+    let lint_cmd = overrides.lint_cmd.clone();
+    let type_cmd = overrides.type_cmd.clone();
+    let unit_cmd = overrides.unit_cmd.clone();
+
+    let scripts = read_package_scripts(project_dir);
+
+    if let Some(cmd) = lint_cmd {
+        gates.push(ScriptGate {
+            name: "lint",
+            command: cmd,
+            hint: "Fix lint errors.",
+        });
+    } else if nr_available && scripts.contains("lint") {
+        gates.push(ScriptGate {
+            name: "lint",
+            command: "nr lint".into(),
+            hint: "Fix lint errors.",
+        });
+    }
+
+    let has_type_check = if let Some(cmd) = type_cmd {
+        gates.push(ScriptGate {
+            name: "type-check",
+            command: cmd,
+            hint: "Fix type errors.",
+        });
+        true
+    } else if nr_available && scripts.contains("test:type") {
+        gates.push(ScriptGate {
+            name: "type-check",
+            command: "nr test:type".into(),
+            hint: "Fix type errors.",
+        });
+        true
+    } else if nr_available && scripts.contains("typecheck") {
+        gates.push(ScriptGate {
+            name: "type-check",
+            command: "nr typecheck".into(),
+            hint: "Fix type errors.",
+        });
+        true
+    } else {
+        false
+    };
+
+    // test:unit preferred; "test" fallback only without type-check
+    if let Some(cmd) = unit_cmd {
+        gates.push(ScriptGate {
+            name: "test",
+            command: cmd,
+            hint: "Fix test failures.",
+        });
+    } else if !nr_available {
+    } else if scripts.contains("test:unit") {
+        gates.push(ScriptGate {
+            name: "test",
+            command: "nr test:unit".into(),
+            hint: "Fix test failures.",
+        });
+    } else if !has_type_check && scripts.contains("test") {
+        gates.push(ScriptGate {
+            name: "test",
+            command: "nr test".into(),
+            hint: "Fix test failures.",
+        });
+    }
+
+    gates
+}
+
+/// Run script gates with type-check → test cascade logic.
+/// lint runs independently; if type-check fails, test is skipped.
+pub fn run_script_gates(gates: &[ScriptGate], project_dir: &std::path::Path) -> Vec<ToolResult> {
+    let mut results = Vec::new();
+
+    let lint = gates.iter().find(|g| g.name == "lint");
+    let type_check = gates.iter().find(|g| g.name == "type-check");
+    let test = gates.iter().find(|g| g.name == "test");
+
+    let lint_handle = lint.map(|g| {
+        let cmd_str = g.command.clone();
+        let hint = g.hint;
+        let dir = project_dir.to_path_buf();
+        std::thread::spawn(move || run_shell_command("lint", &cmd_str, hint, &dir))
+    });
+
+    if let Some(tc) = type_check {
+        let tc_result = run_shell_command("type-check", &tc.command, tc.hint, project_dir);
+        let type_failed = tc_result.is_failure();
+        results.push(tc_result);
+
+        if let Some(t) = test {
+            if type_failed {
+                results.push(ToolResult::skipped("test"));
+            } else {
+                results.push(run_shell_command("test", &t.command, t.hint, project_dir));
+            }
+        }
+    } else if let Some(t) = test {
+        results.push(run_shell_command("test", &t.command, t.hint, project_dir));
+    }
+
+    if let Some(handle) = lint_handle {
+        match handle.join() {
+            Ok(r) => results.push(r),
+            Err(e) => {
+                eprintln!("gates: lint thread panicked: {:?}", e);
+                results.push(ToolResult::skipped("lint"));
+            }
+        }
+    }
+
+    results
+}
+
+fn run_shell_command(
+    name: &'static str,
+    cmd_str: &str,
+    hint: &'static str,
+    project_dir: &std::path::Path,
+) -> ToolResult {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", cmd_str]).current_dir(project_dir);
+    let label = cmd_str.to_string();
+    let mut result = run_command_with_label(name, cmd, GATE_TIMEOUT, Some(&label));
+    result.hint = hint;
+    result
+}
+
+fn read_package_scripts(project_dir: &std::path::Path) -> std::collections::HashSet<String> {
+    let path = project_dir.join("package.json");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return std::collections::HashSet::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return std::collections::HashSet::new();
+    };
+    let Some(scripts) = parsed.get("scripts").and_then(|v| v.as_object()) else {
+        return std::collections::HashSet::new();
+    };
+    scripts.keys().cloned().collect()
+}
+
 #[cfg(test)]
 pub fn gate_by_name(name: &str) -> &'static GateDefinition {
     GATES
@@ -104,8 +300,7 @@ fn kill_process_group(pid: u32) {
         );
         return;
     };
-    // Safety: kill(-pid) sends SIGKILL to the process group led by `pid`.
-    // pid_i32 is validated > 0 by the pid == 0 check and try_from(u32).
+    // SAFETY: pid_i32 > 0 validated above; -pid targets the process group.
     let ret = unsafe { kill(-pid_i32, 9) };
     if ret != 0 {
         eprintln!(
@@ -116,7 +311,16 @@ fn kill_process_group(pid: u32) {
     }
 }
 
-fn run_command(name: &'static str, mut cmd: Command, timeout: Duration) -> ToolResult {
+fn run_command(name: &'static str, cmd: Command, timeout: Duration) -> ToolResult {
+    run_command_with_label(name, cmd, timeout, None)
+}
+
+fn run_command_with_label(
+    name: &'static str,
+    mut cmd: Command,
+    timeout: Duration,
+    label: Option<&str>,
+) -> ToolResult {
     cmd.process_group(0);
 
     let child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
@@ -174,9 +378,12 @@ fn run_command(name: &'static str, mut cmd: Command, timeout: Duration) -> ToolR
             ToolResult::skipped(name)
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            eprintln!("gates: {} timed out after {}s", name, timeout.as_secs());
+            if let Some(l) = label {
+                eprintln!("gates: {} timed out after {}s (cmd: {})", name, timeout.as_secs(), l);
+            } else {
+                eprintln!("gates: {} timed out after {}s", name, timeout.as_secs());
+            }
             kill_process_group(pid);
-            // Brief wait for child cleanup after SIGKILL
             let _ = rx.recv_timeout(Duration::from_secs(2));
             ToolResult::skipped(name)
         }
@@ -203,6 +410,8 @@ pub fn run_gate(gate: &GateDefinition, project: &ProjectInfo) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::TempDir;
+    use std::fs;
     use std::path::PathBuf;
 
     fn test_project(has_pkg: bool, has_ts: bool) -> ProjectInfo {
@@ -211,6 +420,129 @@ mod tests {
             has_package_json: has_pkg,
             has_tsconfig: has_ts,
         }
+    }
+
+    fn setup_package_json(scripts: &str) -> TempDir {
+        let tmp = TempDir::new("script-gate");
+        fs::write(
+            tmp.join("package.json"),
+            format!(r#"{{"scripts":{{{scripts}}}}}"#),
+        )
+        .unwrap();
+        tmp
+    }
+
+    fn no_overrides() -> EnvOverrides {
+        EnvOverrides::default()
+    }
+
+    // T-001: lint script あり → lint gate 生成
+    #[test]
+    fn detect_lint_gate_when_script_exists() {
+        let tmp = setup_package_json(r#""lint":"eslint .""#);
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, true);
+        assert_eq!(gates.len(), 1);
+        assert_eq!(gates[0].name, "lint");
+    }
+
+    // T-002: lint script なし → lint gate なし
+    #[test]
+    fn no_lint_gate_when_no_script() {
+        let tmp = setup_package_json(r#""test":"vitest""#);
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, true);
+        assert!(gates.iter().all(|g| g.name != "lint"));
+    }
+
+    // T-003: test:type script → type-check gate
+    #[test]
+    fn detect_type_check_gate_test_type() {
+        let tmp = setup_package_json(r#""test:type":"tsc --noEmit""#);
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, true);
+        assert!(gates.iter().any(|g| g.name == "type-check"));
+    }
+
+    // T-004: typecheck script → type-check gate
+    #[test]
+    fn detect_type_check_gate_typecheck() {
+        let tmp = setup_package_json(r#""typecheck":"tsc --noEmit""#);
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, true);
+        assert!(gates.iter().any(|g| g.name == "type-check"));
+    }
+
+    // T-005: test:unit + type-check → test = "nr test:unit"
+    #[test]
+    fn detect_test_gate_unit_with_type_check() {
+        let tmp = setup_package_json(r#""test:type":"tsc","test:unit":"vitest","test":"vitest""#);
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, true);
+        let test_gate = gates.iter().find(|g| g.name == "test").unwrap();
+        assert!(test_gate.command.contains("test:unit"));
+    }
+
+    // T-006: test script + no type-check → test = "nr test"
+    #[test]
+    fn detect_test_gate_fallback_to_test() {
+        let tmp = setup_package_json(r#""test":"vitest""#);
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, true);
+        let test_gate = gates.iter().find(|g| g.name == "test").unwrap();
+        assert!(test_gate.command.contains("\"test\"") || test_gate.command.ends_with("test"));
+    }
+
+    // T-008: $LINT_CMD override (works even without nr)
+    #[test]
+    fn env_override_lint_cmd() {
+        let tmp = setup_package_json(r#""lint":"eslint .""#);
+        let overrides = EnvOverrides {
+            lint_cmd: Some("custom-lint".into()),
+            ..Default::default()
+        };
+        let gates = detect_script_gates_inner(&overrides, &tmp, false);
+        let lint_gate = gates.iter().find(|g| g.name == "lint").unwrap();
+        assert_eq!(lint_gate.command, "custom-lint");
+    }
+
+    // T-007: type-check fail → test skip
+    #[test]
+    fn type_check_fail_cascades_to_skip_test() {
+        let tmp = TempDir::new("cascade");
+        fs::create_dir_all(tmp.join(".git")).unwrap();
+
+        let type_gate = ScriptGate {
+            name: "type-check",
+            command: "sh -c 'echo type-error && exit 1'".into(),
+            hint: "Fix type errors.",
+        };
+        let test_gate = ScriptGate {
+            name: "test",
+            command: "echo test-ok".into(),
+            hint: "Fix test failures.",
+        };
+        let results = run_script_gates(&[type_gate, test_gate], &tmp);
+        let type_result = results.iter().find(|r| r.name == "type-check").unwrap();
+        let test_result = results.iter().find(|r| r.name == "test").unwrap();
+        assert!(type_result.is_failure());
+        assert!(test_result.is_skipped(), "test should be skipped when type-check fails");
+    }
+
+    // T-026: nr 未インストール → nr-based gates not generated, env override still works
+    #[test]
+    fn no_nr_skips_script_gates_without_override() {
+        let tmp = setup_package_json(r#""lint":"eslint .","test":"vitest""#);
+
+        // nr absent → no script gates without override
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, false);
+        assert!(gates.is_empty(), "no gates should be generated without nr and no overrides");
+
+        // env override bypasses nr check
+        let overrides = EnvOverrides {
+            lint_cmd: Some("custom-lint".into()),
+            ..Default::default()
+        };
+        let gates = detect_script_gates_inner(&overrides, &tmp, false);
+        assert!(gates.iter().any(|g| g.name == "lint"));
+        assert_eq!(
+            gates.iter().find(|g| g.name == "lint").unwrap().command,
+            "custom-lint"
+        );
     }
 
     #[test]

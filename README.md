@@ -2,30 +2,41 @@
 
 # gates
 
-Quality gates for Claude Code [completion hooks](https://docs.anthropic.com/en/docs/claude-code/hooks). Runs knip, tsgo, and madge in parallel, blocking agent completion on failure.
+Stateful quality gates for Claude Code [completion hooks](https://docs.anthropic.com/en/docs/claude-code/hooks). Runs lint, type-check, test, knip, tsgo, and madge in parallel, blocking agent completion on failure and enforcing a review phase before allowing completion.
 
 ## Features
 
-| Feature        | Description                                                      |
-| -------------- | ---------------------------------------------------------------- |
-| Parallel       | All enabled gates run concurrently on OS threads                 |
-| Fail-open      | Timeouts and missing binaries never block the agent              |
-| Auto-detect    | Only runs gates relevant to the project (package.json, tsconfig) |
-| Binary resolve | Walks `node_modules/.bin` up to `.git` boundary                  |
-| 60s timeout    | SIGKILL to entire process group                                  |
+| Feature         | Description                                                         |
+| --------------- | ------------------------------------------------------------------- |
+| Parallel        | All enabled gates run concurrently on OS threads                    |
+| Fail-open       | Timeouts and missing binaries never block the agent                 |
+| Auto-detect     | Only runs gates relevant to the project (package.json, tsconfig)    |
+| Phase detection | Reads transcript to enforce fix → review → allow completion flow    |
+| Review gate     | Blocks with review instructions on first all-pass, allows on second |
+| Script gates    | Detects lint/type-check/test from package.json, runs via `nr`       |
+| Binary resolve  | Walks `node_modules/.bin` up to `.git` boundary                     |
+| 60s timeout     | SIGKILL to entire process group                                     |
 
 ## How It Works
 
 ```text
-Agent stops → completion hook fires → gates binary runs
+Agent stops → Stop hook fires → stdin JSON piped to gates binary
   ├─ Reads enabled gates from .claude/tools.json
   ├─ Detects project type (package.json, tsconfig.json, src/)
-  ├─ Runs matching gates in parallel on OS threads
-  └─ Outputs first failure as block JSON to stdout
-        → Agent is instructed to fix the issues
+  ├─ Detects script gates (lint, type-check, test) from package.json
+  ├─ Runs all matching gates in parallel on OS threads
+  ├─ Gate failure → blocks with fix instructions
+  └─ All gates pass →
+       ├─ Reads transcript for previous gates output
+       ├─ First all-pass → blocks with review instructions
+       └─ Second all-pass (after review) → allows completion
 ```
 
 ## Gates
+
+### Static Gates
+
+Resolved from `node_modules/.bin`, falling back to `$PATH`.
 
 | Gate  | Condition                      | Args                                  |
 | ----- | ------------------------------ | ------------------------------------- |
@@ -33,17 +44,28 @@ Agent stops → completion hook fires → gates binary runs
 | tsgo  | `tsconfig.json` exists         | (none)                                |
 | madge | `package.json` + `src/` exists | `--circular --extensions ts,tsx src/` |
 
-Gate binaries are resolved from `node_modules/.bin` first, falling back to `$PATH`.
+### Script Gates
+
+Detected from `package.json` scripts, executed via [`nr`](https://github.com/antfu/ni).
+
+| Gate       | Script Detection               | Cascade                     |
+| ---------- | ------------------------------ | --------------------------- |
+| lint       | `"lint"` script                | Independent                 |
+| type-check | `"test:type"` or `"typecheck"` | Independent                 |
+| test       | `"test:unit"` or `"test"`      | Skipped if type-check fails |
+
+When `nr` is not installed, script gates are silently skipped (fail-open). Environment variable overrides (`$LINT_CMD`, `$TYPE_CMD`, `$UNIT_CMD`) bypass `nr` and run the specified command directly.
 
 ## Required Tools
 
 Install the tools for the gates you want to use.
 
-| Tool                                               | Install                               |
-| -------------------------------------------------- | ------------------------------------- |
-| [knip](https://knip.dev)                           | `npm i -D knip` (project-local)       |
-| [tsgo](https://github.com/microsoft/typescript-go) | `npm i -g @typescript/native-preview` |
-| [madge](https://github.com/pahen/madge)            | `npm i -g madge`                      |
+| Tool                                               | Install                                 |
+| -------------------------------------------------- | --------------------------------------- |
+| [nr](https://github.com/antfu/ni)                  | `npm i -g @antfu/ni` (for script gates) |
+| [knip](https://knip.dev)                           | `npm i -D knip` (project-local)         |
+| [tsgo](https://github.com/microsoft/typescript-go) | `npm i -g @typescript/native-preview`   |
+| [madge](https://github.com/pahen/madge)            | `npm i -g madge`                        |
 
 Missing tools are silently skipped.
 
@@ -115,7 +137,7 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-When registered as a Stop hook, `gates` runs in the project directory automatically.
+When registered as a Stop hook, `gates` reads hook JSON from stdin (transcript path, stop_hook_active flag) and runs in the project directory automatically.
 
 ### Direct Execution
 
@@ -127,7 +149,7 @@ gates /path/to/project  # explicit directory
 No output means all gates passed. On failure, block JSON is printed to stdout:
 
 ```json
-{ "decision": "block", "reason": "knip failed. Fix the issues:\nUnused export ..." }
+{ "decision": "block", "reason": "lint failed. Fix lint errors.\n\nerror output..." }
 ```
 
 ## Configuration
@@ -141,22 +163,39 @@ All gates are disabled by default. Set the gates you want to enable to `true`.
   "gates": {
     "knip": true,
     "tsgo": true,
-    "madge": true
+    "madge": true,
+    "lint": true,
+    "type-check": true,
+    "test": true
   }
 }
 ```
 
-### Example
+### Review Phase
 
-Enable only knip:
+By default, when all gates pass for the first time, `gates` blocks with review instructions (code review, regression test verification, 5-step verification gate). On the second all-pass, completion is allowed.
+
+To disable the review phase:
 
 ```json
 {
-  "gates": {
-    "knip": true
-  }
+  "gates": { "lint": true, "test": true },
+  "review": false
 }
 ```
+
+### Environment Variable Overrides
+
+Override script gate commands with environment variables:
+
+| Variable    | Overrides        | Example                   |
+| ----------- | ---------------- | ------------------------- |
+| `$LINT_CMD` | lint gate        | `LINT_CMD="eslint ."`     |
+| `$TYPE_CMD` | type-check       | `TYPE_CMD="tsc --noEmit"` |
+| `$UNIT_CMD` | test gate        | `UNIT_CMD="vitest run"`   |
+| `$TEST_CMD` | all script gates | Legacy single-gate mode   |
+
+When `$TEST_CMD` is set, script gate detection is skipped and only the specified command runs (backwards compatibility with completion-gate.sh).
 
 ### Config Resolution
 
@@ -165,7 +204,7 @@ Config is read from `.claude/tools.json` in the project directory passed as argu
 ```text
 project-root/
 ├── .claude/
-│   └── tools.json     ← {"gates": {"knip": true, "tsgo": true}}
+│   └── tools.json     ← {"gates": {"lint": true, "test": true}, "review": true}
 ├── .git/
 ├── package.json
 ├── tsconfig.json
@@ -181,12 +220,12 @@ different phase — install the full suite for comprehensive coverage:
 brew install thkt/tap/guardrails thkt/tap/formatter thkt/tap/reviews thkt/tap/gates
 ```
 
-| Tool                                             | Hook        | Timing            | Role                              |
-| ------------------------------------------------ | ----------- | ----------------- | --------------------------------- |
-| [guardrails](https://github.com/thkt/guardrails) | PreToolUse  | Before Write/Edit | Lint + security checks            |
-| [formatter](https://github.com/thkt/formatter)   | PostToolUse | After Write/Edit  | Auto code formatting              |
-| [reviews](https://github.com/thkt/reviews)       | PreToolUse  | Before Skill      | Static analysis context injection |
-| **gates**                                        | Stop        | Agent completion  | Quality gates (knip, tsgo, madge) |
+| Tool                                             | Hook        | Timing            | Role                               |
+| ------------------------------------------------ | ----------- | ----------------- | ---------------------------------- |
+| [guardrails](https://github.com/thkt/guardrails) | PreToolUse  | Before Write/Edit | Lint + security checks             |
+| [formatter](https://github.com/thkt/formatter)   | PostToolUse | After Write/Edit  | Auto code formatting               |
+| [reviews](https://github.com/thkt/reviews)       | PreToolUse  | Before Skill      | Static analysis context injection  |
+| **gates**                                        | Stop        | Agent completion  | Quality gates + review enforcement |
 
 See [thkt/tap](https://github.com/thkt/homebrew-tap) for setup details.
 
