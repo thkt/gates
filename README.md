@@ -76,7 +76,7 @@ Missing tools are silently skipped.
 Installs the binary and registers the Stop hook automatically.
 
 ```bash
-claude plugins marketplace add github:thkt/gates
+claude plugins marketplace add thkt/sentinels
 claude plugins install gates
 ```
 

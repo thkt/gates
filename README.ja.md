@@ -76,7 +76,7 @@ Claude Codeの[completion hook](https://docs.anthropic.com/en/docs/claude-code/h
 バイナリのインストールとhookの登録が自動で行われます。
 
 ```bash
-claude plugins marketplace add github:thkt/gates
+claude plugins marketplace add thkt/sentinels
 claude plugins install gates
 ```
 
