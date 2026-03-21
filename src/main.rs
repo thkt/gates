@@ -1,8 +1,10 @@
 mod circular;
+mod color;
 mod config;
 mod input;
 mod phase;
 mod project;
+mod reporter;
 mod resolve;
 mod sanitize;
 #[cfg(test)]
@@ -185,6 +187,11 @@ fn run_with_input_overrides(
     }
 
     warn_missing_tools(&results, &project);
+
+    let summary = reporter::format_summary(&results);
+    if !summary.is_empty() {
+        eprintln!("{summary}");
+    }
 
     let failures: Vec<_> = results.iter().filter(|r| r.is_failure()).collect();
     let ran_count = results.iter().filter(|r| !r.is_skipped()).count();
