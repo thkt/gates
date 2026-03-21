@@ -12,6 +12,15 @@ mod traverse;
 use std::io::IsTerminal;
 use std::path::Path;
 
+const CONFIG_HINT: &str = "Gates: using defaults. Customize via .claude/tools.json \u{2014} see https://github.com/thkt/gates#configuration";
+
+fn should_show_hint(project_dir: &Path, config: &config::GatesConfig) -> bool {
+    if config.source != config::ConfigSource::Default {
+        return false;
+    }
+    project_dir.join(".claude").is_dir()
+}
+
 fn format_failures(failures: &[&tools::ToolResult]) -> String {
     if failures.len() == 1 {
         let f = failures[0];
@@ -67,6 +76,11 @@ fn run_with_input_overrides(
     overrides: tools::EnvOverrides,
 ) -> Option<String> {
     let config = config::GatesConfig::load(project_dir);
+
+    if should_show_hint(project_dir, &config) {
+        eprintln!("{}", CONFIG_HINT);
+    }
+
     let project = project::ProjectInfo::detect(project_dir);
 
     let enabled: Vec<_> = tools::GATES
@@ -353,10 +367,46 @@ mod tests {
     }
 
     #[test]
-    fn no_config_returns_none() {
+    fn no_config_all_gates_skipped_returns_none() {
         let tmp = TempDir::new("main-noconfig");
         fs::create_dir_all(tmp.join(".git")).unwrap();
+        // No package.json, no tsconfig → all gate conditions fail → all skipped
         assert!(run(&tmp).is_none());
+    }
+
+    #[test]
+    fn hint_shown_when_default_config_with_claude_dir() {
+        let tmp = TempDir::new("hint");
+        fs::create_dir_all(tmp.join(".claude")).unwrap();
+        let config = config::GatesConfig::default();
+        assert!(should_show_hint(&tmp, &config));
+    }
+
+    #[test]
+    fn hint_not_shown_when_explicit_config() {
+        let tmp = TempDir::new("hint");
+        fs::create_dir_all(tmp.join(".claude")).unwrap();
+        let config = config::GatesConfig {
+            source: config::ConfigSource::Explicit,
+            ..Default::default()
+        };
+        assert!(!should_show_hint(&tmp, &config));
+    }
+
+    #[test]
+    fn hint_not_shown_when_file_exists_without_gates_key() {
+        let tmp = TempDir::new("hint");
+        fs::create_dir_all(tmp.join(".claude")).unwrap();
+        fs::write(tmp.join(".claude/tools.json"), r#"{"review":false}"#).unwrap();
+        let config = config::GatesConfig::load(&tmp);
+        assert!(!should_show_hint(&tmp, &config));
+    }
+
+    #[test]
+    fn hint_not_shown_when_no_claude_dir() {
+        let tmp = TempDir::new("hint");
+        let config = config::GatesConfig::default();
+        assert!(!should_show_hint(&tmp, &config));
     }
 
     #[test]
@@ -390,7 +440,6 @@ mod tests {
         assert!(json["reason"].as_str().unwrap().contains("knip failed"));
     }
 
-    // Phase integration: all pass + no transcript → review block
     #[test]
     fn all_pass_without_transcript_returns_review_block() {
         let tmp = setup_project(
@@ -427,7 +476,6 @@ mod tests {
         );
     }
 
-    // Phase integration: all pass + transcript with AllPassed → allow
     #[test]
     fn all_pass_after_review_allows_completion() {
         let tmp = setup_project(
@@ -468,7 +516,6 @@ mod tests {
         assert!(result.is_none(), "should allow completion after review");
     }
 
-    // CQ-1: $TEST_CMD legacy mode → single gate, script detection skipped
     #[test]
     fn legacy_test_cmd_runs_single_gate() {
         let tmp = setup_project(r#"{"gates":{"lint":true,"test":true}}"#, &["package.json"]);
@@ -478,7 +525,6 @@ mod tests {
         )
         .unwrap();
 
-        // $TEST_CMD set → single gate mode, lint and test from package.json are skipped
         let result = run_with_input_overrides(
             &tmp,
             None,
@@ -496,14 +542,12 @@ mod tests {
             reason.contains("legacy-fail"),
             "should contain legacy test output"
         );
-        // Should NOT contain lint output (script gates are skipped in legacy mode)
         assert!(
             !reason.contains("lint"),
             "lint should not run in legacy mode"
         );
     }
 
-    // T-025: lint enabled + fails → block
     #[test]
     fn script_gate_lint_failure_blocks() {
         let tmp = setup_project(r#"{"gates":{"lint":true}}"#, &["package.json"]);

@@ -1,87 +1,79 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 const TOOLS_CONFIG_FILE: &str = ".claude/tools.json";
 
 #[derive(Debug, PartialEq)]
+pub enum ConfigSource {
+    Default,
+    Explicit,
+}
+
+#[derive(Debug, PartialEq)]
 pub struct GatesConfig {
-    pub knip: bool,
-    pub tsgo: bool,
-    pub madge: bool,
-    pub lint: bool,
-    pub type_check: bool,
-    pub test: bool,
+    pub gates: Option<HashMap<String, bool>>,
     pub review: bool,
+    pub source: ConfigSource,
 }
 
 impl Default for GatesConfig {
     fn default() -> Self {
         Self {
-            knip: false,
-            tsgo: false,
-            madge: false,
-            lint: false,
-            type_check: false,
-            test: false,
+            gates: None,
             review: true,
+            source: ConfigSource::Default,
         }
     }
 }
 
 #[derive(Deserialize)]
 struct ToolsJson {
-    gates: Option<GatesSection>,
+    gates: Option<HashMap<String, serde_json::Value>>,
     review: Option<bool>,
-}
-
-#[derive(Deserialize)]
-struct GatesSection {
-    knip: Option<bool>,
-    tsgo: Option<bool>,
-    madge: Option<bool>,
-    lint: Option<bool>,
-    #[serde(rename = "type-check")]
-    type_check: Option<bool>,
-    test: Option<bool>,
 }
 
 impl GatesConfig {
     pub fn is_enabled(&self, name: &str) -> bool {
-        match name {
-            "knip" => self.knip,
-            "tsgo" => self.tsgo,
-            "madge" => self.madge,
-            "lint" => self.lint,
-            "type-check" => self.type_check,
-            "test" => self.test,
-            _ => false,
+        match &self.gates {
+            None => true,
+            Some(map) => *map.get(name).unwrap_or(&false),
         }
     }
 
     pub fn load(project_dir: &Path) -> Self {
         let path = project_dir.join(TOOLS_CONFIG_FILE);
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            return Self::default();
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(e) => {
+                eprintln!("gates: failed to read {}: {}", path.display(), e);
+                return Self::default();
+            }
         };
-        let Ok(parsed) = serde_json::from_str::<ToolsJson>(&content) else {
-            eprintln!("gates: failed to parse {}", path.display());
-            return Self::default();
+        let parsed = match serde_json::from_str::<ToolsJson>(&content) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("gates: failed to parse {}: {}", path.display(), e);
+                return Self::default();
+            }
         };
         let review = parsed.review.unwrap_or(true);
-        let Some(gates) = parsed.gates else {
+        let Some(gates_map) = parsed.gates else {
             return Self {
+                gates: None,
                 review,
-                ..Self::default()
+                source: ConfigSource::Explicit,
             };
         };
+        let gates: HashMap<String, bool> = gates_map
+            .into_iter()
+            .filter_map(|(k, v)| v.as_bool().map(|b| (k, b)))
+            .collect();
         Self {
-            knip: gates.knip.unwrap_or(false),
-            tsgo: gates.tsgo.unwrap_or(false),
-            madge: gates.madge.unwrap_or(false),
-            lint: gates.lint.unwrap_or(false),
-            type_check: gates.type_check.unwrap_or(false),
-            test: gates.test.unwrap_or(false),
+            gates: Some(gates),
             review,
+            source: ConfigSource::Explicit,
         }
     }
 }
@@ -106,55 +98,44 @@ mod tests {
     fn reads_gates_section() {
         let dir = setup_dir(Some(r#"{"gates":{"knip":true,"tsgo":false,"madge":true}}"#));
         let config = GatesConfig::load(&dir);
-        assert!(config.knip);
-        assert!(!config.tsgo);
-        assert!(config.madge);
+        assert!(config.is_enabled("knip"));
+        assert!(!config.is_enabled("tsgo"));
+        assert!(config.is_enabled("madge"));
+        assert_eq!(config.source, ConfigSource::Explicit);
     }
 
     #[test]
-    fn missing_file_returns_default() {
+    fn missing_file_enables_all_gates() {
         let dir = setup_dir(None);
         let config = GatesConfig::load(&dir);
-        assert_eq!(config, GatesConfig::default());
+        assert!(config.is_enabled("any-name"));
+        assert_eq!(config.source, ConfigSource::Default);
     }
 
     #[test]
-    fn missing_gates_section_returns_default() {
+    fn missing_gates_section_enables_all_gates() {
         let dir = setup_dir(Some(r#"{"reviews":{"tools":{"knip":true}}}"#));
         let config = GatesConfig::load(&dir);
-        assert_eq!(config, GatesConfig::default());
+        assert!(config.is_enabled("any-name"));
+        assert_eq!(config.source, ConfigSource::Explicit);
     }
 
     #[test]
     fn partial_gates_section() {
         let dir = setup_dir(Some(r#"{"gates":{"knip":true}}"#));
         let config = GatesConfig::load(&dir);
-        assert!(config.knip);
-        assert!(!config.tsgo);
-        assert!(!config.madge);
-        assert!(!config.lint);
+        assert!(config.is_enabled("knip"));
+        assert!(!config.is_enabled("unlisted"));
     }
 
     #[test]
-    fn invalid_json_returns_default() {
+    fn invalid_json_enables_all_gates() {
         let dir = setup_dir(Some("not json{{{"));
         let config = GatesConfig::load(&dir);
-        assert_eq!(config, GatesConfig::default());
+        assert!(config.is_enabled("knip"));
+        assert_eq!(config.source, ConfigSource::Default);
     }
 
-    // T-001 config: new gate settings
-    #[test]
-    fn reads_new_gate_settings() {
-        let dir = setup_dir(Some(
-            r#"{"gates":{"knip":true,"lint":true,"type-check":true,"test":true}}"#,
-        ));
-        let config = GatesConfig::load(&dir);
-        assert!(config.is_enabled("lint"));
-        assert!(config.is_enabled("type-check"));
-        assert!(config.is_enabled("test"));
-    }
-
-    // T-024: review: false
     #[test]
     fn review_disabled() {
         let dir = setup_dir(Some(r#"{"gates":{"knip":true},"review":false}"#));
@@ -167,5 +148,24 @@ mod tests {
         let dir = setup_dir(Some(r#"{"gates":{"knip":true}}"#));
         let config = GatesConfig::load(&dir);
         assert!(config.review);
+    }
+
+    #[test]
+    fn unknown_gate_names_are_preserved() {
+        let dir = setup_dir(Some(
+            r#"{"gates":{"test-quality":true,"my-custom-gate":false}}"#,
+        ));
+        let config = GatesConfig::load(&dir);
+        assert!(config.is_enabled("test-quality"));
+        assert!(!config.is_enabled("my-custom-gate"));
+    }
+
+    #[test]
+    fn non_bool_gate_values_are_ignored() {
+        let dir = setup_dir(Some(r#"{"gates":{"knip":true,"bad":"string","num":42}}"#));
+        let config = GatesConfig::load(&dir);
+        assert!(config.is_enabled("knip"));
+        assert!(!config.is_enabled("bad"));
+        assert!(!config.is_enabled("num"));
     }
 }
