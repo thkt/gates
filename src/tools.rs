@@ -32,6 +32,14 @@ impl ToolResult {
         }
     }
 
+    pub fn passed(name: &'static str) -> Self {
+        Self {
+            name,
+            hint: "",
+            outcome: GateOutcome::Passed,
+        }
+    }
+
     pub fn is_failure(&self) -> bool {
         matches!(self.outcome, GateOutcome::Failed(_))
     }
@@ -56,6 +64,35 @@ pub struct GateDefinition {
     pub condition: fn(&ProjectInfo) -> bool,
 }
 
+pub struct InstallInfo {
+    pub name: &'static str,
+    pub install: &'static str,
+}
+
+pub const INSTALL_COMMANDS: &[InstallInfo] = &[
+    InstallInfo {
+        name: "knip",
+        install: "npm i -D knip",
+    },
+    InstallInfo {
+        name: "tsgo",
+        install: "npm i -g @typescript/native-preview",
+    },
+];
+
+pub fn command_exists(command: &str, project_root: &std::path::Path) -> bool {
+    let resolved = resolve::resolve_bin(command, project_root);
+    if resolved.as_os_str() != command {
+        return true;
+    }
+    let Ok(path_var) = std::env::var("PATH") else {
+        return false;
+    };
+    path_var
+        .split(':')
+        .any(|dir| std::path::Path::new(dir).join(command).is_file())
+}
+
 pub const GATES: &[GateDefinition] = &[
     GateDefinition {
         name: "knip",
@@ -70,13 +107,6 @@ pub const GATES: &[GateDefinition] = &[
         args: &[],
         hint: "Fix type errors.",
         condition: |p| p.has_tsconfig,
-    },
-    GateDefinition {
-        name: "madge",
-        command: "madge",
-        args: &["--circular", "--extensions", "ts,tsx", "src/"],
-        hint: "Break circular import dependencies.",
-        condition: |p| p.has_package_json && p.root.join("src").is_dir(),
     },
 ];
 
@@ -105,31 +135,33 @@ impl EnvOverrides {
     }
 }
 
-fn has_nr_in_path(path_override: &str) -> bool {
-    if path_override.is_empty() {
-        std::process::Command::new("nr")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok()
-    } else {
-        std::path::Path::new(path_override).join("nr").is_file()
+fn detect_run_prefix(project_dir: &std::path::Path) -> Option<String> {
+    let candidates: &[(&str, &str)] = &[
+        ("pnpm-lock.yaml", "pnpm run"),
+        ("bun.lock", "bun run"),
+        ("yarn.lock", "yarn run"),
+        ("package-lock.json", "npm run"),
+    ];
+    for (lock_file, prefix) in candidates {
+        if project_dir.join(lock_file).exists() {
+            return Some((*prefix).into());
+        }
     }
+    None
 }
 
 pub fn detect_script_gates_with_overrides(
     overrides: &EnvOverrides,
     project_dir: &std::path::Path,
 ) -> Vec<ScriptGate> {
-    let nr_available = has_nr_in_path("");
-    detect_script_gates_inner(overrides, project_dir, nr_available)
+    let run_prefix = detect_run_prefix(project_dir);
+    detect_script_gates_inner(overrides, project_dir, run_prefix.as_deref())
 }
 
 fn detect_script_gates_inner(
     overrides: &EnvOverrides,
     project_dir: &std::path::Path,
-    nr_available: bool,
+    run_prefix: Option<&str>,
 ) -> Vec<ScriptGate> {
     let mut gates = Vec::new();
 
@@ -145,12 +177,14 @@ fn detect_script_gates_inner(
             command: cmd,
             hint: "Fix lint errors.",
         });
-    } else if nr_available && scripts.contains("lint") {
-        gates.push(ScriptGate {
-            name: "lint",
-            command: "nr lint".into(),
-            hint: "Fix lint errors.",
-        });
+    } else if let Some(prefix) = run_prefix {
+        if scripts.contains("lint") {
+            gates.push(ScriptGate {
+                name: "lint",
+                command: format!("{prefix} lint"),
+                hint: "Fix lint errors.",
+            });
+        }
     }
 
     let has_type_check = if let Some(cmd) = type_cmd {
@@ -160,20 +194,24 @@ fn detect_script_gates_inner(
             hint: "Fix type errors.",
         });
         true
-    } else if nr_available && scripts.contains("test:type") {
-        gates.push(ScriptGate {
-            name: "type-check",
-            command: "nr test:type".into(),
-            hint: "Fix type errors.",
-        });
-        true
-    } else if nr_available && scripts.contains("typecheck") {
-        gates.push(ScriptGate {
-            name: "type-check",
-            command: "nr typecheck".into(),
-            hint: "Fix type errors.",
-        });
-        true
+    } else if let Some(prefix) = run_prefix {
+        if scripts.contains("test:type") {
+            gates.push(ScriptGate {
+                name: "type-check",
+                command: format!("{prefix} test:type"),
+                hint: "Fix type errors.",
+            });
+            true
+        } else if scripts.contains("typecheck") {
+            gates.push(ScriptGate {
+                name: "type-check",
+                command: format!("{prefix} typecheck"),
+                hint: "Fix type errors.",
+            });
+            true
+        } else {
+            false
+        }
     } else {
         false
     };
@@ -185,19 +223,20 @@ fn detect_script_gates_inner(
             command: cmd,
             hint: "Fix test failures.",
         });
-    } else if !nr_available {
-    } else if scripts.contains("test:unit") {
-        gates.push(ScriptGate {
-            name: "test",
-            command: "nr test:unit".into(),
-            hint: "Fix test failures.",
-        });
-    } else if !has_type_check && scripts.contains("test") {
-        gates.push(ScriptGate {
-            name: "test",
-            command: "nr test".into(),
-            hint: "Fix test failures.",
-        });
+    } else if let Some(prefix) = run_prefix {
+        if scripts.contains("test:unit") {
+            gates.push(ScriptGate {
+                name: "test",
+                command: format!("{prefix} test:unit"),
+                hint: "Fix test failures.",
+            });
+        } else if !has_type_check && scripts.contains("test") {
+            gates.push(ScriptGate {
+                name: "test",
+                command: format!("{prefix} test"),
+                hint: "Fix test failures.",
+            });
+        }
     }
 
     gates
@@ -399,6 +438,76 @@ fn run_command_with_label(
     }
 }
 
+pub fn run_litmus(project: &ProjectInfo) -> ToolResult {
+    if !project.has_package_json {
+        return ToolResult::skipped("litmus");
+    }
+
+    let files = litmus::find_test_files(&project.root);
+    if files.is_empty() {
+        return ToolResult::skipped("litmus");
+    }
+
+    let result = litmus::analyze_files(&files);
+
+    for error in &result.errors {
+        eprintln!("gates: {error}");
+    }
+
+    if result.issues.is_empty() {
+        return ToolResult::passed("litmus");
+    }
+
+    let output: Vec<String> = result.issues.iter().map(|i| i.to_string()).collect();
+    let truncated = sanitize::tail_lines(&output.join("\n"), MAX_OUTPUT_LINES);
+
+    ToolResult {
+        name: "litmus",
+        hint: "Fix test quality issues (weak assertions, mock overuse, tautological tests).",
+        outcome: GateOutcome::Failed(truncated),
+    }
+}
+
+pub fn run_circular(project: &ProjectInfo) -> ToolResult {
+    let src_dir = project.root.join("src");
+    if !project.has_package_json || !src_dir.is_dir() {
+        return ToolResult::skipped("circular");
+    }
+
+    let result = crate::circular::detect(&src_dir);
+
+    if result.cycles.is_empty() {
+        return ToolResult::passed("circular");
+    }
+
+    let n = result.cycles.len();
+    let header = format!(
+        "Found {} circular {}:\n",
+        n,
+        if n == 1 { "dependency" } else { "dependencies" }
+    );
+    let body: String = result
+        .cycles
+        .iter()
+        .map(|cycle| {
+            cycle
+                .iter()
+                .map(String::as_str)
+                .chain(std::iter::once(cycle[0].as_str()))
+                .collect::<Vec<_>>()
+                .join(" → ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let truncated = sanitize::tail_lines(&format!("{header}{body}"), MAX_OUTPUT_LINES);
+
+    ToolResult {
+        name: "circular",
+        hint: "Break circular import dependencies.",
+        outcome: GateOutcome::Failed(truncated),
+    }
+}
+
 pub fn run_gate(gate: &GateDefinition, project: &ProjectInfo) -> ToolResult {
     if !(gate.condition)(project) {
         return ToolResult::skipped(gate.name);
@@ -441,58 +550,54 @@ mod tests {
         EnvOverrides::default()
     }
 
-    // T-001: lint script あり → lint gate 生成
+    const NPM: Option<&str> = Some("npm run");
+
     #[test]
     fn detect_lint_gate_when_script_exists() {
         let tmp = setup_package_json(r#""lint":"eslint .""#);
-        let gates = detect_script_gates_inner(&no_overrides(), &tmp, true);
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, NPM);
         assert_eq!(gates.len(), 1);
         assert_eq!(gates[0].name, "lint");
+        assert_eq!(gates[0].command, "npm run lint");
     }
 
-    // T-002: lint script なし → lint gate なし
     #[test]
     fn no_lint_gate_when_no_script() {
         let tmp = setup_package_json(r#""test":"vitest""#);
-        let gates = detect_script_gates_inner(&no_overrides(), &tmp, true);
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, NPM);
         assert!(gates.iter().all(|g| g.name != "lint"));
     }
 
-    // T-003: test:type script → type-check gate
     #[test]
     fn detect_type_check_gate_test_type() {
         let tmp = setup_package_json(r#""test:type":"tsc --noEmit""#);
-        let gates = detect_script_gates_inner(&no_overrides(), &tmp, true);
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, NPM);
         assert!(gates.iter().any(|g| g.name == "type-check"));
     }
 
-    // T-004: typecheck script → type-check gate
     #[test]
     fn detect_type_check_gate_typecheck() {
         let tmp = setup_package_json(r#""typecheck":"tsc --noEmit""#);
-        let gates = detect_script_gates_inner(&no_overrides(), &tmp, true);
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, NPM);
         assert!(gates.iter().any(|g| g.name == "type-check"));
     }
 
-    // T-005: test:unit + type-check → test = "nr test:unit"
     #[test]
     fn detect_test_gate_unit_with_type_check() {
         let tmp = setup_package_json(r#""test:type":"tsc","test:unit":"vitest","test":"vitest""#);
-        let gates = detect_script_gates_inner(&no_overrides(), &tmp, true);
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, NPM);
         let test_gate = gates.iter().find(|g| g.name == "test").unwrap();
         assert!(test_gate.command.contains("test:unit"));
     }
 
-    // T-006: test script + no type-check → test = "nr test"
     #[test]
     fn detect_test_gate_fallback_to_test() {
         let tmp = setup_package_json(r#""test":"vitest""#);
-        let gates = detect_script_gates_inner(&no_overrides(), &tmp, true);
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, NPM);
         let test_gate = gates.iter().find(|g| g.name == "test").unwrap();
-        assert!(test_gate.command.contains("\"test\"") || test_gate.command.ends_with("test"));
+        assert!(test_gate.command.ends_with("test"));
     }
 
-    // T-008: $LINT_CMD override (works even without nr)
     #[test]
     fn env_override_lint_cmd() {
         let tmp = setup_package_json(r#""lint":"eslint .""#);
@@ -500,12 +605,11 @@ mod tests {
             lint_cmd: Some("custom-lint".into()),
             ..Default::default()
         };
-        let gates = detect_script_gates_inner(&overrides, &tmp, false);
+        let gates = detect_script_gates_inner(&overrides, &tmp, None);
         let lint_gate = gates.iter().find(|g| g.name == "lint").unwrap();
         assert_eq!(lint_gate.command, "custom-lint");
     }
 
-    // T-007: type-check fail → test skip
     #[test]
     fn type_check_fail_cascades_to_skip_test() {
         let tmp = TempDir::new("cascade");
@@ -531,29 +635,57 @@ mod tests {
         );
     }
 
-    // T-026: nr 未インストール → nr-based gates not generated, env override still works
     #[test]
-    fn no_nr_skips_script_gates_without_override() {
+    fn no_lock_file_skips_script_gates_without_override() {
         let tmp = setup_package_json(r#""lint":"eslint .","test":"vitest""#);
 
-        // nr absent → no script gates without override
-        let gates = detect_script_gates_inner(&no_overrides(), &tmp, false);
+        let gates = detect_script_gates_inner(&no_overrides(), &tmp, None);
         assert!(
             gates.is_empty(),
-            "no gates should be generated without nr and no overrides"
+            "no gates should be generated without lock file and no overrides"
         );
 
-        // env override bypasses nr check
         let overrides = EnvOverrides {
             lint_cmd: Some("custom-lint".into()),
             ..Default::default()
         };
-        let gates = detect_script_gates_inner(&overrides, &tmp, false);
+        let gates = detect_script_gates_inner(&overrides, &tmp, None);
         assert!(gates.iter().any(|g| g.name == "lint"));
         assert_eq!(
             gates.iter().find(|g| g.name == "lint").unwrap().command,
             "custom-lint"
         );
+    }
+
+    #[test]
+    fn detect_run_prefix_from_lock_files() {
+        let tmp = TempDir::new("lock-detect");
+
+        assert!(detect_run_prefix(&tmp).is_none());
+
+        fs::write(tmp.join("pnpm-lock.yaml"), "").unwrap();
+        assert_eq!(detect_run_prefix(&tmp).as_deref(), Some("pnpm run"));
+        fs::remove_file(tmp.join("pnpm-lock.yaml")).unwrap();
+
+        fs::write(tmp.join("package-lock.json"), "").unwrap();
+        assert_eq!(detect_run_prefix(&tmp).as_deref(), Some("npm run"));
+        fs::remove_file(tmp.join("package-lock.json")).unwrap();
+
+        fs::write(tmp.join("bun.lock"), "").unwrap();
+        assert_eq!(detect_run_prefix(&tmp).as_deref(), Some("bun run"));
+        fs::remove_file(tmp.join("bun.lock")).unwrap();
+
+        fs::write(tmp.join("yarn.lock"), "").unwrap();
+        assert_eq!(detect_run_prefix(&tmp).as_deref(), Some("yarn run"));
+    }
+
+    #[test]
+    fn pnpm_lock_generates_pnpm_commands() {
+        let tmp = setup_package_json(r#""lint":"eslint .","test":"vitest""#);
+        fs::write(tmp.join("pnpm-lock.yaml"), "").unwrap();
+        let gates = detect_script_gates_with_overrides(&no_overrides(), &tmp);
+        let lint = gates.iter().find(|g| g.name == "lint").unwrap();
+        assert_eq!(lint.command, "pnpm run lint");
     }
 
     #[test]
@@ -569,7 +701,6 @@ mod tests {
         for (name, project) in [
             ("knip", test_project(false, false)),
             ("tsgo", test_project(true, false)),
-            ("madge", test_project(false, true)),
         ] {
             let result = run_gate(gate_by_name(name), &project);
             assert!(result.is_skipped(), "{name} should skip");
@@ -600,18 +731,150 @@ mod tests {
 
         assert!(!(gate_by_name("tsgo").condition)(&pkg_only));
         assert!((gate_by_name("tsgo").condition)(&ts_only));
+    }
 
-        assert!(!(gate_by_name("madge").condition)(&pkg_only));
-        assert!(!(gate_by_name("madge").condition)(&ts_only));
+    #[test]
+    fn circular_skips_without_package_json() {
+        let project = test_project(false, false);
+        let result = run_circular(&project);
+        assert!(result.is_skipped());
+    }
 
-        let tmp = crate::test_utils::TempDir::new("madge-cond");
-        std::fs::create_dir_all(tmp.join("src")).unwrap();
-        let with_src = ProjectInfo {
+    #[test]
+    fn circular_skips_without_src_dir() {
+        let tmp = TempDir::new("circular-nosrc");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        let project = ProjectInfo {
             root: tmp.to_path_buf(),
             has_package_json: true,
             has_tsconfig: false,
         };
-        assert!((gate_by_name("madge").condition)(&with_src));
+        let result = run_circular(&project);
+        assert!(result.is_skipped());
+    }
+
+    #[test]
+    fn circular_passes_clean_project() {
+        let tmp = TempDir::new("circular-pass");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        let src = tmp.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("a.ts"),
+            "import { b } from './b';\nexport const a = b + 1;\n",
+        )
+        .unwrap();
+        fs::write(src.join("b.ts"), "export const b = 42;\n").unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_circular(&project);
+        assert!(!result.is_failure(), "clean project should pass");
+    }
+
+    #[test]
+    fn circular_detects_cycle() {
+        let tmp = TempDir::new("circular-fail");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        let src = tmp.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("a.ts"),
+            "import { b } from './b';\nexport const a = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            src.join("b.ts"),
+            "import { a } from './a';\nexport const b = 2;\n",
+        )
+        .unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_circular(&project);
+        assert!(result.is_failure(), "circular deps should fail");
+        let output = result.output();
+        assert!(output.contains("1 circular dependency"), "should show count: {output}");
+        assert!(output.contains(" → "), "should show arrow chain: {output}");
+    }
+
+    #[test]
+    fn litmus_skips_without_package_json() {
+        let project = test_project(false, false);
+        let result = run_litmus(&project);
+        assert!(result.is_skipped());
+    }
+
+    #[test]
+    fn litmus_skips_when_no_test_files() {
+        let tmp = TempDir::new("litmus-empty");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_litmus(&project);
+        assert!(result.is_skipped());
+    }
+
+    #[test]
+    fn litmus_passes_with_good_tests() {
+        let tmp = TempDir::new("litmus-good");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        fs::create_dir_all(tmp.join("src")).unwrap();
+        fs::write(
+            tmp.join("src/example.test.ts"),
+            r#"
+import { describe, test, expect } from 'vitest';
+describe('math', () => {
+    test('adds two numbers correctly', () => {
+        const result = add(1, 2);
+        expect(result).toBe(3);
+    });
+});
+"#,
+        )
+        .unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_litmus(&project);
+        assert!(
+            !result.is_failure(),
+            "good test should pass: {:?}",
+            result.outcome
+        );
+    }
+
+    #[test]
+    fn litmus_detects_tautological_test() {
+        let tmp = TempDir::new("litmus-bad");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        fs::write(
+            tmp.join("bad.test.ts"),
+            r#"
+import { test, expect } from 'vitest';
+test('works', () => {
+    expect(true).toBe(true);
+});
+"#,
+        )
+        .unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_litmus(&project);
+        assert!(result.is_failure(), "tautological test should fail");
+        assert!(result.output().contains("tautological"));
     }
 
     #[test]

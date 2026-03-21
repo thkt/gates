@@ -2,7 +2,7 @@
 
 # gates
 
-Stateful quality gates for Claude Code [completion hooks](https://docs.anthropic.com/en/docs/claude-code/hooks). Runs lint, type-check, test, knip, tsgo, and madge in parallel, blocking agent completion on failure and enforcing a review phase before allowing completion.
+Stateful quality gates for Claude Code [completion hooks](https://docs.anthropic.com/en/docs/claude-code/hooks). Runs lint, type-check, test, knip, tsgo, litmus, and circular dependency detection in parallel, blocking agent completion on failure and enforcing a review phase before allowing completion.
 
 ## Features
 
@@ -13,7 +13,7 @@ Stateful quality gates for Claude Code [completion hooks](https://docs.anthropic
 | Auto-detect     | Only runs gates relevant to the project (package.json, tsconfig)    |
 | Phase detection | Reads transcript to enforce fix → review → allow completion flow    |
 | Review gate     | Blocks with review instructions on first all-pass, allows on second |
-| Script gates    | Detects lint/type-check/test from package.json, runs via `nr`       |
+| Script gates    | Detects lint/type-check/test from package.json, auto-detects pm     |
 | Binary resolve  | Walks `node_modules/.bin` up to `.git` boundary                     |
 | 60s timeout     | SIGKILL to entire process group                                     |
 
@@ -38,15 +38,23 @@ Agent stops → Stop hook fires → stdin JSON piped to gates binary
 
 Resolved from `node_modules/.bin`, falling back to `$PATH`.
 
-| Gate  | Condition                      | Args                                  |
-| ----- | ------------------------------ | ------------------------------------- |
-| knip  | `package.json` exists          | (none)                                |
-| tsgo  | `tsconfig.json` exists         | (none)                                |
-| madge | `package.json` + `src/` exists | `--circular --extensions ts,tsx src/` |
+| Gate | Condition              | Args   |
+| ---- | ---------------------- | ------ |
+| knip | `package.json` exists  | (none) |
+| tsgo | `tsconfig.json` exists | (none) |
+
+### Embedded Gates
+
+Built into the `gates` binary. No separate installation required.
+
+| Gate     | Condition                               | Detects                                           |
+| -------- | --------------------------------------- | ------------------------------------------------- |
+| litmus   | `package.json` + `*.test.ts/tsx` exists | Weak assertions, mock overuse, tautological tests |
+| circular | `package.json` + `src/` exists          | Circular import dependencies (oxc-based AST)      |
 
 ### Script Gates
 
-Detected from `package.json` scripts, executed via [`nr`](https://github.com/antfu/ni).
+Detected from `package.json` scripts. The package manager is auto-detected from lock files (`pnpm-lock.yaml` → pnpm, `bun.lock` → bun, `yarn.lock` → yarn, `package-lock.json` → npm).
 
 | Gate       | Script Detection               | Cascade                     |
 | ---------- | ------------------------------ | --------------------------- |
@@ -54,20 +62,20 @@ Detected from `package.json` scripts, executed via [`nr`](https://github.com/ant
 | type-check | `"test:type"` or `"typecheck"` | Independent                 |
 | test       | `"test:unit"` or `"test"`      | Skipped if type-check fails |
 
-When `nr` is not installed, script gates are silently skipped (fail-open). Environment variable overrides (`$LINT_CMD`, `$TYPE_CMD`, `$UNIT_CMD`) bypass `nr` and run the specified command directly.
+When no lock file is found, script gates are silently skipped (fail-open). Environment variable overrides (`$LINT_CMD`, `$TYPE_CMD`, `$UNIT_CMD`) bypass auto-detection and run the specified command directly.
 
 ## Required Tools
 
 Install the tools for the gates you want to use.
 
-| Tool                                               | Install                                 |
-| -------------------------------------------------- | --------------------------------------- |
-| [nr](https://github.com/antfu/ni)                  | `npm i -g @antfu/ni` (for script gates) |
-| [knip](https://knip.dev)                           | `npm i -D knip` (project-local)         |
-| [tsgo](https://github.com/microsoft/typescript-go) | `npm i -g @typescript/native-preview`   |
-| [madge](https://github.com/pahen/madge)            | `npm i -g madge`                        |
+| Tool                                               | Install                               |
+| -------------------------------------------------- | ------------------------------------- |
+| [knip](https://knip.dev)                           | `npm i -D knip` (project-local)       |
+| [tsgo](https://github.com/microsoft/typescript-go) | `npm i -g @typescript/native-preview` |
 
-Missing tools are silently skipped.
+[litmus](https://github.com/thkt/litmus) and circular dependency detection are embedded in the `gates` binary — no separate installation needed.
+
+Missing tools are skipped (fail-open). A warning is printed to stderr if an enabled gate's binary is not found.
 
 ## Installation
 
@@ -144,6 +152,7 @@ When registered as a Stop hook, `gates` reads hook JSON from stdin (transcript p
 ```bash
 gates              # uses current directory
 gates /path/to/project  # explicit directory
+gates --setup          # show install commands for missing tools
 ```
 
 No output means all gates passed. On failure, block JSON is printed to stdout:
@@ -156,14 +165,15 @@ No output means all gates passed. On failure, block JSON is printed to stdout:
 
 Add a `gates` key to `.claude/tools.json` in your project root.
 
-All gates are disabled by default. Set the gates you want to enable to `true`.
+When no config file exists, all gates run by default. Once you create `.claude/tools.json` with a `gates` key, only the gates set to `true` are enabled.
 
 ```json
 {
   "gates": {
     "knip": true,
     "tsgo": true,
-    "madge": true,
+    "circular": true,
+    "litmus": true,
     "lint": true,
     "type-check": true,
     "test": true

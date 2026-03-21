@@ -1,3 +1,4 @@
+mod circular;
 mod config;
 mod input;
 mod phase;
@@ -103,7 +104,11 @@ fn run_with_input_overrides(
             .collect()
     };
 
-    let total_enabled = enabled.len() + script_gates.len();
+    let litmus_enabled = config.is_enabled("litmus");
+    let circular_enabled = config.is_enabled("circular");
+
+    let total_enabled =
+        enabled.len() + script_gates.len() + usize::from(litmus_enabled) + usize::from(circular_enabled);
     if total_enabled == 0 {
         return None;
     }
@@ -119,6 +124,20 @@ fn run_with_input_overrides(
             )
         })
         .collect();
+
+    let litmus_handle = if litmus_enabled {
+        let p = project.clone();
+        Some(std::thread::spawn(move || tools::run_litmus(&p)))
+    } else {
+        None
+    };
+
+    let circular_handle = if circular_enabled {
+        let p = project.clone();
+        Some(std::thread::spawn(move || tools::run_circular(&p)))
+    } else {
+        None
+    };
 
     let script_gate_names: Vec<&'static str> = script_gates.iter().map(|g| g.name).collect();
     let script_handle = if !script_gates.is_empty() {
@@ -141,6 +160,18 @@ fn run_with_input_overrides(
         })
         .collect();
 
+    for (name, handle) in [("litmus", litmus_handle), ("circular", circular_handle)] {
+        if let Some(h) = handle {
+            match h.join() {
+                Ok(result) => results.push(result),
+                Err(e) => {
+                    eprintln!("gates: {name} thread panicked: {e:?}");
+                    results.push(tools::ToolResult::skipped(name));
+                }
+            }
+        }
+    }
+
     if let Some(handle) = script_handle {
         match handle.join() {
             Ok(script_results) => results.extend(script_results),
@@ -153,12 +184,7 @@ fn run_with_input_overrides(
         }
     }
 
-    if results.iter().all(|r| r.is_skipped()) && total_enabled > 0 {
-        eprintln!(
-            "gates: warning: all {} enabled gates were skipped (binaries not found?)",
-            total_enabled
-        );
-    }
+    warn_missing_tools(&results, &project);
 
     let failures: Vec<_> = results.iter().filter(|r| r.is_failure()).collect();
     let ran_count = results.iter().filter(|r| !r.is_skipped()).count();
@@ -205,18 +231,82 @@ fn run_with_input_overrides(
     }
 }
 
+fn setup(project_dir: &Path) {
+    let cfg = config::GatesConfig::load(project_dir);
+    let project = project::ProjectInfo::detect(project_dir);
+
+    let mut missing = Vec::new();
+    let mut installed = Vec::new();
+
+    for gate in tools::GATES {
+        if !cfg.is_enabled(gate.name) || !(gate.condition)(&project) {
+            continue;
+        }
+        if tools::command_exists(gate.command, &project.root) {
+            installed.push(gate.name);
+        } else {
+            missing.push(gate.name);
+        }
+    }
+
+    if missing.is_empty() {
+        println!("All enabled gates are ready.");
+    } else {
+        println!("# Missing tools for enabled gates:");
+        for name in &missing {
+            if let Some(info) = tools::INSTALL_COMMANDS.iter().find(|i| i.name == *name) {
+                println!("{}", info.install);
+            } else {
+                println!("# {name}: install manually");
+            }
+        }
+    }
+
+    if !installed.is_empty() {
+        println!("# Already installed: {}", installed.join(", "));
+    }
+}
+
+fn warn_missing_tools(results: &[tools::ToolResult], project: &project::ProjectInfo) {
+    let missing: Vec<&str> = tools::GATES
+        .iter()
+        .filter(|g| {
+            (g.condition)(project)
+                && results.iter().any(|r| r.name == g.name && r.is_skipped())
+        })
+        .map(|g| g.name)
+        .collect();
+
+    if !missing.is_empty() {
+        eprintln!(
+            "Gates: {} enabled but not installed: {}. Run `gates --setup` to see install commands.",
+            missing.len(),
+            missing.join(", ")
+        );
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() > 2 {
-        eprintln!("usage: gates [project_dir]");
+
+    let is_setup = args.iter().any(|a| a == "--setup");
+    let dir_args: Vec<&str> = args.iter().skip(1).filter(|a| *a != "--setup").map(String::as_str).collect();
+
+    if dir_args.len() > 1 {
+        eprintln!("usage: gates [--setup] [project_dir]");
         std::process::exit(1);
     }
 
-    let dir = args.get(1).map(String::as_str).unwrap_or(".");
+    let dir = dir_args.first().copied().unwrap_or(".");
     let project_dir = Path::new(dir);
     if !project_dir.is_dir() {
         eprintln!("gates: not a directory: {}", project_dir.display());
         std::process::exit(1);
+    }
+
+    if is_setup {
+        setup(project_dir);
+        return;
     }
 
     let hook_input = if std::io::stdin().is_terminal() {
