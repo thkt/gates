@@ -231,82 +231,34 @@ fn run_with_input_overrides(
     }
 }
 
-fn setup(project_dir: &Path) {
-    let cfg = config::GatesConfig::load(project_dir);
-    let project = project::ProjectInfo::detect(project_dir);
-
-    let mut missing = Vec::new();
-    let mut installed = Vec::new();
-
+fn warn_missing_tools(results: &[tools::ToolResult], project: &project::ProjectInfo) {
     for gate in tools::GATES {
-        if !cfg.is_enabled(gate.name) || !(gate.condition)(&project) {
+        if !(gate.condition)(project) {
             continue;
         }
-        if tools::command_exists(gate.command, &project.root) {
-            installed.push(gate.name);
+        if !results.iter().any(|r| r.name == gate.name && r.is_skipped()) {
+            continue;
+        }
+        if let Some(info) = tools::INSTALL_COMMANDS.iter().find(|i| i.name == gate.name) {
+            eprintln!("Gates: {} not installed. Install: {}", gate.name, info.install);
         } else {
-            missing.push(gate.name);
+            eprintln!("Gates: {} not installed. Install manually.", gate.name);
         }
-    }
-
-    if missing.is_empty() {
-        println!("All enabled gates are ready.");
-    } else {
-        println!("# Missing tools for enabled gates:");
-        for name in &missing {
-            if let Some(info) = tools::INSTALL_COMMANDS.iter().find(|i| i.name == *name) {
-                println!("{}", info.install);
-            } else {
-                println!("# {name}: install manually");
-            }
-        }
-    }
-
-    if !installed.is_empty() {
-        println!("# Already installed: {}", installed.join(", "));
-    }
-}
-
-fn warn_missing_tools(results: &[tools::ToolResult], project: &project::ProjectInfo) {
-    let missing: Vec<&str> = tools::GATES
-        .iter()
-        .filter(|g| {
-            (g.condition)(project)
-                && results.iter().any(|r| r.name == g.name && r.is_skipped())
-        })
-        .map(|g| g.name)
-        .collect();
-
-    if !missing.is_empty() {
-        eprintln!(
-            "Gates: {} enabled but not installed: {}. Run `gates --setup` to see install commands.",
-            missing.len(),
-            missing.join(", ")
-        );
     }
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-
-    let is_setup = args.iter().any(|a| a == "--setup");
-    let dir_args: Vec<&str> = args.iter().skip(1).filter(|a| *a != "--setup").map(String::as_str).collect();
-
-    if dir_args.len() > 1 {
-        eprintln!("usage: gates [--setup] [project_dir]");
+    if args.len() > 2 {
+        eprintln!("usage: gates [project_dir]");
         std::process::exit(1);
     }
 
-    let dir = dir_args.first().copied().unwrap_or(".");
+    let dir = args.get(1).map(String::as_str).unwrap_or(".");
     let project_dir = Path::new(dir);
     if !project_dir.is_dir() {
         eprintln!("gates: not a directory: {}", project_dir.display());
         std::process::exit(1);
-    }
-
-    if is_setup {
-        setup(project_dir);
-        return;
     }
 
     let hook_input = if std::io::stdin().is_terminal() {

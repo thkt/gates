@@ -80,18 +80,6 @@ pub const INSTALL_COMMANDS: &[InstallInfo] = &[
     },
 ];
 
-pub fn command_exists(command: &str, project_root: &std::path::Path) -> bool {
-    let resolved = resolve::resolve_bin(command, project_root);
-    if resolved.as_os_str() != command {
-        return true;
-    }
-    let Ok(path_var) = std::env::var("PATH") else {
-        return false;
-    };
-    path_var
-        .split(':')
-        .any(|dir| std::path::Path::new(dir).join(command).is_file())
-}
 
 pub const GATES: &[GateDefinition] = &[
     GateDefinition {

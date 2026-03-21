@@ -152,7 +152,6 @@ When registered as a Stop hook, `gates` reads hook JSON from stdin (transcript p
 ```bash
 gates              # uses current directory
 gates /path/to/project  # explicit directory
-gates --setup          # show install commands for missing tools
 ```
 
 No output means all gates passed. On failure, block JSON is printed to stdout:

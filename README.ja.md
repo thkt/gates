@@ -152,7 +152,6 @@ Stop hookとして登録すると、`gates` はstdinからhook JSON（transcript
 ```bash
 gates              # カレントディレクトリを使用
 gates /path/to/project  # ディレクトリを明示指定
-gates --setup          # 未インストールツールのインストールコマンドを表示
 ```
 
 出力がなければ全ゲート通過。失敗時はblock JSONを出力します。
