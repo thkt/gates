@@ -1,5 +1,5 @@
 use crate::color;
-use crate::tools::{GateOutcome, ToolResult};
+use crate::tools::ToolResult;
 
 // Match guardrails separator lengths (header + "Gates " = 50, footer = 50)
 const HEADER_SEPARATOR: &str = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
@@ -60,6 +60,7 @@ pub fn format_summary(results: &[ToolResult]) -> String {
 mod tests {
     use super::*;
     use crate::color::strip_ansi;
+    use crate::tools::GateOutcome;
 
     fn passed(name: &'static str) -> ToolResult {
         ToolResult {
