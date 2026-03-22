@@ -165,14 +165,14 @@ fn detect_script_gates_inner(
             command: cmd,
             hint: "Fix lint errors.",
         });
-    } else if let Some(prefix) = run_prefix {
-        if scripts.contains("lint") {
-            gates.push(ScriptGate {
-                name: "lint",
-                command: format!("{prefix} lint"),
-                hint: "Fix lint errors.",
-            });
-        }
+    } else if let Some(prefix) = run_prefix
+        && scripts.contains("lint")
+    {
+        gates.push(ScriptGate {
+            name: "lint",
+            command: format!("{prefix} lint"),
+            hint: "Fix lint errors.",
+        });
     }
 
     let has_type_check = if let Some(cmd) = type_cmd {

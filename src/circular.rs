@@ -52,10 +52,9 @@ fn collect_source_files(dir: &Path, files: &mut Vec<PathBuf>) {
         } else if matches!(
             path.extension().and_then(|e| e.to_str()),
             Some("ts" | "tsx")
-        ) {
-            if let Ok(canonical) = path.canonicalize() {
-                files.push(canonical);
-            }
+        ) && let Ok(canonical) = path.canonicalize()
+        {
+            files.push(canonical);
         }
     }
 }
