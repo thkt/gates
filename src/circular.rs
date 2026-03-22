@@ -233,8 +233,16 @@ mod tests {
         let tmp = TempDir::new("circular-cycle");
         let src = tmp.join("src");
         fs::create_dir_all(&src).unwrap();
-        fs::write(src.join("a.ts"), "import { b } from './b';\nexport const a = 1;\n").unwrap();
-        fs::write(src.join("b.ts"), "import { a } from './a';\nexport const b = 2;\n").unwrap();
+        fs::write(
+            src.join("a.ts"),
+            "import { b } from './b';\nexport const a = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            src.join("b.ts"),
+            "import { a } from './a';\nexport const b = 2;\n",
+        )
+        .unwrap();
 
         let result = detect(&src);
         assert_eq!(result.cycles.len(), 1);
@@ -246,9 +254,21 @@ mod tests {
         let tmp = TempDir::new("circular-3node");
         let src = tmp.join("src");
         fs::create_dir_all(&src).unwrap();
-        fs::write(src.join("a.ts"), "import { b } from './b';\nexport const a = 1;\n").unwrap();
-        fs::write(src.join("b.ts"), "import { c } from './c';\nexport const b = 2;\n").unwrap();
-        fs::write(src.join("c.ts"), "import { a } from './a';\nexport const c = 3;\n").unwrap();
+        fs::write(
+            src.join("a.ts"),
+            "import { b } from './b';\nexport const a = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            src.join("b.ts"),
+            "import { c } from './c';\nexport const b = 2;\n",
+        )
+        .unwrap();
+        fs::write(
+            src.join("c.ts"),
+            "import { a } from './a';\nexport const c = 3;\n",
+        )
+        .unwrap();
 
         let result = detect(&src);
         assert_eq!(result.cycles.len(), 1);
@@ -275,8 +295,16 @@ mod tests {
         let tmp = TempDir::new("circular-reexport");
         let src = tmp.join("src");
         fs::create_dir_all(&src).unwrap();
-        fs::write(src.join("a.ts"), "export { b } from './b';\nexport const a = 1;\n").unwrap();
-        fs::write(src.join("b.ts"), "export * from './a';\nexport const b = 2;\n").unwrap();
+        fs::write(
+            src.join("a.ts"),
+            "export { b } from './b';\nexport const a = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            src.join("b.ts"),
+            "export * from './a';\nexport const b = 2;\n",
+        )
+        .unwrap();
 
         let result = detect(&src);
         assert_eq!(result.cycles.len(), 1);

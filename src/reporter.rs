@@ -17,7 +17,11 @@ pub fn format_summary(results: &[ToolResult]) -> String {
     if failures.is_empty() {
         return format!(
             "\n{}",
-            color::bold_green(&format!("Gates \u{2713} {}/{} passed", ran.len(), ran.len()))
+            color::bold_green(&format!(
+                "Gates \u{2713} {}/{} passed",
+                ran.len(),
+                ran.len()
+            ))
         );
     }
 
@@ -32,8 +36,7 @@ pub fn format_summary(results: &[ToolResult]) -> String {
         if output.is_empty() {
             continue;
         }
-        let non_blank: Vec<&str> =
-            output.lines().filter(|l| !l.trim().is_empty()).collect();
+        let non_blank: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
         let total = non_blank.len();
         for line in &non_blank[..total.min(MAX_PREVIEW_LINES)] {
             lines.push(color::red(&format!("    {line}")));
@@ -112,7 +115,9 @@ mod tests {
         assert!(output.contains("\u{2717} test"), "missing failed gate");
         assert!(!output.contains("lint"), "passed gate should not appear");
         assert!(!output.contains("knip"), "passed gate should not appear");
-        assert!(output.contains("BLOCKED: 1 gate failed. Fix the source code and retry. Do not circumvent this check."));
+        assert!(output.contains(
+            "BLOCKED: 1 gate failed. Fix the source code and retry. Do not circumvent this check."
+        ));
     }
 
     #[test]
@@ -121,7 +126,9 @@ mod tests {
         let output = strip_ansi(&format_summary(&results));
         assert!(output.contains("\u{2717} lint"));
         assert!(output.contains("\u{2717} test"));
-        assert!(output.contains("BLOCKED: 2 gates failed. Fix the source code and retry. Do not circumvent this check."));
+        assert!(output.contains(
+            "BLOCKED: 2 gates failed. Fix the source code and retry. Do not circumvent this check."
+        ));
     }
 
     #[test]
@@ -133,13 +140,21 @@ mod tests {
 
     #[test]
     fn failure_output_preview() {
-        let results =
-            vec![failed_with("test", "FAIL src/app.test.ts\nExpected 1, got 2\nsome detail")];
+        let results = vec![failed_with(
+            "test",
+            "FAIL src/app.test.ts\nExpected 1, got 2\nsome detail",
+        )];
         let output = strip_ansi(&format_summary(&results));
-        assert!(output.contains("FAIL src/app.test.ts"), "missing first line");
+        assert!(
+            output.contains("FAIL src/app.test.ts"),
+            "missing first line"
+        );
         assert!(output.contains("Expected 1, got 2"), "missing second line");
         assert!(output.contains("some detail"), "missing third line");
-        assert!(!output.contains("more lines"), "should not truncate 3 lines");
+        assert!(
+            !output.contains("more lines"),
+            "should not truncate 3 lines"
+        );
     }
 
     #[test]
@@ -178,7 +193,11 @@ mod tests {
 
     #[test]
     fn header_footer_separators_match_guardrails() {
-        assert_eq!(HEADER_SEPARATOR.chars().count(), 44, "header: Gates + 44 = 50");
+        assert_eq!(
+            HEADER_SEPARATOR.chars().count(),
+            44,
+            "header: Gates + 44 = 50"
+        );
         assert_eq!(FOOTER_SEPARATOR.chars().count(), 50, "footer: 50 chars");
     }
 }

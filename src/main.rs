@@ -74,10 +74,7 @@ fn run(project_dir: &Path) -> Option<String> {
     run_with_overrides(project_dir, tools::EnvOverrides::from_env())
 }
 
-fn run_with_overrides(
-    project_dir: &Path,
-    overrides: tools::EnvOverrides,
-) -> Option<String> {
+fn run_with_overrides(project_dir: &Path, overrides: tools::EnvOverrides) -> Option<String> {
     let config = config::GatesConfig::load(project_dir);
 
     if should_show_hint(project_dir, &config) {
@@ -109,8 +106,10 @@ fn run_with_overrides(
     let litmus_enabled = config.is_enabled("litmus");
     let circular_enabled = config.is_enabled("circular");
 
-    let total_enabled =
-        enabled.len() + script_gates.len() + usize::from(litmus_enabled) + usize::from(circular_enabled);
+    let total_enabled = enabled.len()
+        + script_gates.len()
+        + usize::from(litmus_enabled)
+        + usize::from(circular_enabled);
     if total_enabled == 0 {
         return None;
     }
@@ -217,11 +216,17 @@ fn warn_missing_tools(results: &[tools::ToolResult], project: &project::ProjectI
         if !(gate.condition)(project) {
             continue;
         }
-        if !results.iter().any(|r| r.name == gate.name && r.is_skipped()) {
+        if !results
+            .iter()
+            .any(|r| r.name == gate.name && r.is_skipped())
+        {
             continue;
         }
         if let Some(info) = tools::INSTALL_COMMANDS.iter().find(|i| i.name == gate.name) {
-            eprintln!("Gates: {} not installed. Install: {}", gate.name, info.install);
+            eprintln!(
+                "Gates: {} not installed. Install: {}",
+                gate.name, info.install
+            );
         } else {
             eprintln!("Gates: {} not installed. Install manually.", gate.name);
         }
@@ -455,10 +460,7 @@ mod tests {
 
     #[test]
     fn all_pass_allows_completion() {
-        let tmp = setup_project(
-            r#"{"gates":{"lint":true}}"#,
-            &["package.json"],
-        );
+        let tmp = setup_project(r#"{"gates":{"lint":true}}"#, &["package.json"]);
         fs::write(
             tmp.join("package.json"),
             r#"{"scripts":{"lint":"eslint ."}}"#,
@@ -473,7 +475,10 @@ mod tests {
             },
         );
 
-        assert!(result.is_none(), "should allow completion when all gates pass");
+        assert!(
+            result.is_none(),
+            "should allow completion when all gates pass"
+        );
     }
 
     #[test]

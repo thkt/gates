@@ -80,7 +80,6 @@ pub const INSTALL_COMMANDS: &[InstallInfo] = &[
     },
 ];
 
-
 pub const GATES: &[GateDefinition] = &[
     GateDefinition {
         name: "knip",
@@ -794,7 +793,10 @@ mod tests {
         let result = run_circular(&project);
         assert!(result.is_failure(), "circular deps should fail");
         let output = result.output();
-        assert!(output.contains("1 circular dependency"), "should show count: {output}");
+        assert!(
+            output.contains("1 circular dependency"),
+            "should show count: {output}"
+        );
         assert!(output.contains(" → "), "should show arrow chain: {output}");
     }
 
