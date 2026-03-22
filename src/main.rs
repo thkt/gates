@@ -31,7 +31,7 @@ fn should_show_hint(project_dir: &Path, config: &config::GatesConfig) -> bool {
 }
 
 fn format_failures(failures: &[&tools::ToolResult]) -> String {
-    let mut lines = Vec::new();
+    let mut lines = vec![String::new()];
     lines.push(color::bold_red(&format!(
         "Gates {}",
         reporter::HEADER_SEPARATOR
@@ -278,7 +278,7 @@ mod tests {
             count,
             if count == 1 { "" } else { "s" }
         );
-        let mut lines = vec![header.as_str()];
+        let mut lines = vec!["", header.as_str()];
         lines.extend_from_slice(gate_lines);
         lines.push(reporter::FOOTER_SEPARATOR);
         lines.push(&blocked);
