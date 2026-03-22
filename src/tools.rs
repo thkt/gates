@@ -291,10 +291,18 @@ fn run_shell_command(
 
 fn read_package_scripts(project_dir: &std::path::Path) -> std::collections::HashSet<String> {
     let path = project_dir.join("package.json");
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return std::collections::HashSet::new();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return std::collections::HashSet::new();
+        }
+        Err(e) => {
+            eprintln!("gates: failed to read {}: {}", path.display(), e);
+            return std::collections::HashSet::new();
+        }
     };
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) else {
+        eprintln!("gates: failed to parse {}", path.display());
         return std::collections::HashSet::new();
     };
     let Some(scripts) = parsed.get("scripts").and_then(|v| v.as_object()) else {

@@ -13,7 +13,6 @@ pub enum ConfigSource {
 #[derive(Debug, PartialEq)]
 pub struct GatesConfig {
     pub gates: Option<HashMap<String, bool>>,
-    pub review: bool,
     pub source: ConfigSource,
 }
 
@@ -21,7 +20,6 @@ impl Default for GatesConfig {
     fn default() -> Self {
         Self {
             gates: None,
-            review: true,
             source: ConfigSource::Default,
         }
     }
@@ -30,7 +28,6 @@ impl Default for GatesConfig {
 #[derive(Deserialize)]
 struct ToolsJson {
     gates: Option<HashMap<String, serde_json::Value>>,
-    review: Option<bool>,
 }
 
 impl GatesConfig {
@@ -58,21 +55,28 @@ impl GatesConfig {
                 return Self::default();
             }
         };
-        let review = parsed.review.unwrap_or(true);
         let Some(gates_map) = parsed.gates else {
             return Self {
                 gates: None,
-                review,
                 source: ConfigSource::Explicit,
             };
         };
-        let gates: HashMap<String, bool> = gates_map
-            .into_iter()
-            .filter_map(|(k, v)| v.as_bool().map(|b| (k, b)))
-            .collect();
+        let mut gates: HashMap<String, bool> = HashMap::new();
+        for (k, v) in gates_map {
+            match v.as_bool() {
+                Some(b) => {
+                    gates.insert(k, b);
+                }
+                None => {
+                    eprintln!(
+                        "gates: ignoring non-boolean value for gate '{}' in {}",
+                        k, TOOLS_CONFIG_FILE
+                    );
+                }
+            }
+        }
         Self {
             gates: Some(gates),
-            review,
             source: ConfigSource::Explicit,
         }
     }
@@ -134,20 +138,6 @@ mod tests {
         let config = GatesConfig::load(&dir);
         assert!(config.is_enabled("knip"));
         assert_eq!(config.source, ConfigSource::Default);
-    }
-
-    #[test]
-    fn review_disabled() {
-        let dir = setup_dir(Some(r#"{"gates":{"knip":true},"review":false}"#));
-        let config = GatesConfig::load(&dir);
-        assert!(!config.review);
-    }
-
-    #[test]
-    fn review_defaults_to_true() {
-        let dir = setup_dir(Some(r#"{"gates":{"knip":true}}"#));
-        let config = GatesConfig::load(&dir);
-        assert!(config.review);
     }
 
     #[test]

@@ -1,8 +1,6 @@
 mod circular;
 mod color;
 mod config;
-mod input;
-mod phase;
 mod project;
 mod reporter;
 mod resolve;
@@ -12,10 +10,18 @@ mod test_utils;
 mod tools;
 mod traverse;
 
-use std::io::IsTerminal;
 use std::path::Path;
 
 const CONFIG_HINT: &str = "Gates: using defaults. Customize via .claude/tools.json \u{2014} see https://github.com/thkt/gates#configuration";
+
+const BANNED_FOOTER: &str = "\
+---\n\
+Banned in completion claims: \"should\", \"probably\", \"seems to\", \"I think\", \"looks like\".\n\
+Replace with evidence from command output.";
+
+fn build_fix_prompt(failures: &str) -> String {
+    format!("{failures}\n\n{BANNED_FOOTER}")
+}
 
 fn should_show_hint(project_dir: &Path, config: &config::GatesConfig) -> bool {
     if config.source != config::ConfigSource::Default {
@@ -24,15 +30,19 @@ fn should_show_hint(project_dir: &Path, config: &config::GatesConfig) -> bool {
     project_dir.join(".claude").is_dir()
 }
 
+fn hint_or_default(hint: &str) -> &str {
+    if hint.is_empty() {
+        "Fix the issues:"
+    } else {
+        hint
+    }
+}
+
 fn format_failures(failures: &[&tools::ToolResult]) -> String {
     if failures.len() == 1 {
         let f = failures[0];
         let output = f.output();
-        let action = if f.hint.is_empty() {
-            "Fix the issues:"
-        } else {
-            f.hint
-        };
+        let action = hint_or_default(f.hint);
         return if output.is_empty() {
             format!("{} failed.", f.name)
         } else {
@@ -44,11 +54,7 @@ fn format_failures(failures: &[&tools::ToolResult]) -> String {
         .iter()
         .map(|f| {
             let output = f.output();
-            let hint = if f.hint.is_empty() {
-                "Fix the issues:"
-            } else {
-                f.hint
-            };
+            let hint = hint_or_default(f.hint);
             if output.is_empty() {
                 format!("## {}\n{}", f.name, hint)
             } else {
@@ -64,18 +70,12 @@ fn format_failures(failures: &[&tools::ToolResult]) -> String {
     )
 }
 
-#[cfg(test)]
 fn run(project_dir: &Path) -> Option<String> {
-    run_with_input(project_dir, None)
+    run_with_overrides(project_dir, tools::EnvOverrides::from_env())
 }
 
-fn run_with_input(project_dir: &Path, hook_input: Option<input::HookInput>) -> Option<String> {
-    run_with_input_overrides(project_dir, hook_input, tools::EnvOverrides::from_env())
-}
-
-fn run_with_input_overrides(
+fn run_with_overrides(
     project_dir: &Path,
-    hook_input: Option<input::HookInput>,
     overrides: tools::EnvOverrides,
 ) -> Option<String> {
     let config = config::GatesConfig::load(project_dir);
@@ -201,7 +201,7 @@ fn run_with_input_overrides(
     }
 
     if !failures.is_empty() {
-        let reason = phase::build_fix_prompt(&format_failures(&failures));
+        let reason = build_fix_prompt(&format_failures(&failures));
         let block = serde_json::json!({
             "decision": "block",
             "reason": reason
@@ -209,33 +209,7 @@ fn run_with_input_overrides(
         return Some(block.to_string());
     }
 
-    // Phase detection only activates when hook input is provided (stop hook mode).
-    // Without hook input (CLI mode), all-pass = allow.
-    let input = hook_input.as_ref()?;
-
-    let previous = input
-        .transcript_path
-        .as_deref()
-        .map(|p| phase::detect_previous_block(Path::new(p)))
-        .unwrap_or(phase::PreviousBlock::NotFound);
-
-    let current_phase = phase::determine_phase(true, &previous, config.review);
-
-    match current_phase {
-        phase::Phase::Allow => None,
-        phase::Phase::Review => {
-            let reason = phase::build_review_prompt();
-            let block = serde_json::json!({
-                "decision": "block",
-                "reason": reason
-            });
-            Some(block.to_string())
-        }
-        phase::Phase::Fix => {
-            eprintln!("gates: unexpected Fix phase with all_passed=true");
-            None
-        }
-    }
+    None
 }
 
 fn warn_missing_tools(results: &[tools::ToolResult], project: &project::ProjectInfo) {
@@ -268,17 +242,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let hook_input = if std::io::stdin().is_terminal() {
-        None
-    } else {
-        let hi = input::HookInput::from_stdin();
-        if hi.stop_hook_active == Some(true) {
-            return; // exit 0 immediately
-        }
-        Some(hi)
-    };
-
-    if let Some(json) = run_with_input(project_dir, hook_input) {
+    if let Some(json) = run(project_dir) {
         println!("{}", json);
     }
 }
@@ -490,9 +454,9 @@ mod tests {
     }
 
     #[test]
-    fn all_pass_without_transcript_returns_review_block() {
+    fn all_pass_allows_completion() {
         let tmp = setup_project(
-            r#"{"gates":{"lint":true},"review":true}"#,
+            r#"{"gates":{"lint":true}}"#,
             &["package.json"],
         );
         fs::write(
@@ -501,68 +465,15 @@ mod tests {
         )
         .unwrap();
 
-        let hook_input = input::HookInput {
-            transcript_path: None,
-            session_id: None,
-            stop_hook_active: None,
-        };
-        let result = run_with_input_overrides(
+        let result = run_with_overrides(
             &tmp,
-            Some(hook_input),
             tools::EnvOverrides {
                 lint_cmd: Some("true".into()),
                 ..Default::default()
             },
         );
 
-        assert!(result.is_some(), "should block for review");
-        let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
-        assert_eq!(json["decision"], "block");
-        let reason = json["reason"].as_str().unwrap();
-        assert!(
-            reason.contains(phase::ALL_PASSED_MARKER),
-            "should contain all-passed marker"
-        );
-    }
-
-    #[test]
-    fn all_pass_after_review_allows_completion() {
-        let tmp = setup_project(
-            r#"{"gates":{"lint":true},"review":true}"#,
-            &["package.json"],
-        );
-        fs::write(
-            tmp.join("package.json"),
-            r#"{"scripts":{"lint":"eslint ."}}"#,
-        )
-        .unwrap();
-
-        let transcript = tmp.join("transcript.jsonl");
-        fs::write(
-            &transcript,
-            &format!(
-                r#"{{"type":"tool_result","content":"{{\"decision\":\"block\",\"reason\":\"{}\"}}"}}
-"#,
-                phase::ALL_PASSED_MARKER
-            ),
-        )
-        .unwrap();
-
-        let hook_input = input::HookInput {
-            transcript_path: Some(transcript.to_string_lossy().into()),
-            session_id: None,
-            stop_hook_active: None,
-        };
-        let result = run_with_input_overrides(
-            &tmp,
-            Some(hook_input),
-            tools::EnvOverrides {
-                lint_cmd: Some("true".into()),
-                ..Default::default()
-            },
-        );
-
-        assert!(result.is_none(), "should allow completion after review");
+        assert!(result.is_none(), "should allow completion when all gates pass");
     }
 
     #[test]
@@ -574,9 +485,8 @@ mod tests {
         )
         .unwrap();
 
-        let result = run_with_input_overrides(
+        let result = run_with_overrides(
             &tmp,
-            None,
             tools::EnvOverrides {
                 test_cmd: Some("sh -c 'echo legacy-fail && exit 1'".into()),
                 ..Default::default()
@@ -606,9 +516,8 @@ mod tests {
         )
         .unwrap();
 
-        let result = run_with_input_overrides(
+        let result = run_with_overrides(
             &tmp,
-            None,
             tools::EnvOverrides {
                 lint_cmd: Some("sh -c 'echo lint-error && exit 1'".into()),
                 ..Default::default()
