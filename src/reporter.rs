@@ -2,8 +2,8 @@ use crate::color;
 use crate::tools::ToolResult;
 
 // Match guardrails separator lengths (header + "Gates " = 50, footer = 50)
-const HEADER_SEPARATOR: &str = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-const FOOTER_SEPARATOR: &str = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+pub(crate) const HEADER_SEPARATOR: &str = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+pub(crate) const FOOTER_SEPARATOR: &str = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
 const MAX_PREVIEW_LINES: usize = 3;
 
 pub fn format_summary(results: &[ToolResult]) -> String {

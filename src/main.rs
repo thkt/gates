@@ -30,44 +30,46 @@ fn should_show_hint(project_dir: &Path, config: &config::GatesConfig) -> bool {
     project_dir.join(".claude").is_dir()
 }
 
-fn hint_or_default(hint: &str) -> &str {
-    if hint.is_empty() {
-        "Fix the issues:"
-    } else {
-        hint
-    }
-}
-
 fn format_failures(failures: &[&tools::ToolResult]) -> String {
-    if failures.len() == 1 {
-        let f = failures[0];
-        let output = f.output();
-        let action = hint_or_default(f.hint);
-        return if output.is_empty() {
-            format!("{} failed.", f.name)
+    let mut lines = Vec::new();
+    lines.push(color::bold_red(&format!(
+        "Gates {}",
+        reporter::HEADER_SEPARATOR
+    )));
+
+    for (i, f) in failures.iter().enumerate() {
+        if i > 0 {
+            lines.push(String::new());
+        }
+        lines.push(color::red(&format!("  \u{2717} {}", f.name)));
+        let hint = if f.hint.is_empty() {
+            "Fix the issues:"
         } else {
-            format!("{} failed. {}\n\n{}", f.name, action, output)
+            f.hint
         };
+        lines.push(color::red(&format!("    {hint}")));
+
+        let output = f.output();
+        if !output.is_empty() {
+            lines.push(String::new());
+            for line in output.lines() {
+                if line.trim().is_empty() {
+                    lines.push(String::new());
+                } else {
+                    lines.push(color::red(&format!("    {line}")));
+                }
+            }
+        }
     }
 
-    let sections: Vec<String> = failures
-        .iter()
-        .map(|f| {
-            let output = f.output();
-            let hint = hint_or_default(f.hint);
-            if output.is_empty() {
-                format!("## {}\n{}", f.name, hint)
-            } else {
-                format!("## {}\n{}\n\n{}", f.name, hint, output)
-            }
-        })
-        .collect();
-
-    format!(
-        "{} gates failed. Fix all issues:\n\n{}",
+    lines.push(color::bold_red(reporter::FOOTER_SEPARATOR));
+    lines.push(color::bold_red(&format!(
+        "BLOCKED: {} gate{} failed. Fix the source code and retry. Do not circumvent this check.",
         failures.len(),
-        sections.join("\n\n")
-    )
+        if failures.len() == 1 { "" } else { "s" }
+    )));
+
+    lines.join("\n")
 }
 
 fn run(project_dir: &Path) -> Option<String> {
@@ -269,6 +271,20 @@ mod tests {
         tmp
     }
 
+    fn expected_block(gate_lines: &[&str], count: usize) -> String {
+        let header = format!("Gates {}", reporter::HEADER_SEPARATOR);
+        let blocked = format!(
+            "BLOCKED: {} gate{} failed. Fix the source code and retry. Do not circumvent this check.",
+            count,
+            if count == 1 { "" } else { "s" }
+        );
+        let mut lines = vec![header.as_str()];
+        lines.extend_from_slice(gate_lines);
+        lines.push(reporter::FOOTER_SEPARATOR);
+        lines.push(&blocked);
+        lines.join("\n")
+    }
+
     #[test]
     fn format_single_failure_with_output() {
         let r = tools::ToolResult {
@@ -276,10 +292,18 @@ mod tests {
             hint: "Remove unused exports and dependencies.",
             outcome: tools::GateOutcome::Failed("Unused export: src/foo.ts".into()),
         };
-        let result = format_failures(&[&r]);
+        let result = color::strip_ansi(&format_failures(&[&r]));
         assert_eq!(
             result,
-            "knip failed. Remove unused exports and dependencies.\n\nUnused export: src/foo.ts"
+            expected_block(
+                &[
+                    "  \u{2717} knip",
+                    "    Remove unused exports and dependencies.",
+                    "",
+                    "    Unused export: src/foo.ts",
+                ],
+                1
+            )
         );
     }
 
@@ -290,8 +314,17 @@ mod tests {
             hint: "Remove unused exports and dependencies.",
             outcome: tools::GateOutcome::Failed(String::new()),
         };
-        let result = format_failures(&[&r]);
-        assert_eq!(result, "knip failed.");
+        let result = color::strip_ansi(&format_failures(&[&r]));
+        assert_eq!(
+            result,
+            expected_block(
+                &[
+                    "  \u{2717} knip",
+                    "    Remove unused exports and dependencies.",
+                ],
+                1
+            )
+        );
     }
 
     #[test]
@@ -301,8 +334,19 @@ mod tests {
             hint: "",
             outcome: tools::GateOutcome::Failed("error output".into()),
         };
-        let result = format_failures(&[&r]);
-        assert_eq!(result, "custom failed. Fix the issues:\n\nerror output");
+        let result = color::strip_ansi(&format_failures(&[&r]));
+        assert_eq!(
+            result,
+            expected_block(
+                &[
+                    "  \u{2717} custom",
+                    "    Fix the issues:",
+                    "",
+                    "    error output",
+                ],
+                1
+            )
+        );
     }
 
     #[test]
@@ -317,16 +361,23 @@ mod tests {
             hint: "Fix type errors.",
             outcome: tools::GateOutcome::Failed("TS2345: type error".into()),
         };
-        let result = format_failures(&[&r1, &r2]);
+        let result = color::strip_ansi(&format_failures(&[&r1, &r2]));
         assert_eq!(
             result,
-            "2 gates failed. Fix all issues:\n\n\
-             ## knip\n\
-             Remove unused exports and dependencies.\n\n\
-             Unused export\n\n\
-             ## tsgo\n\
-             Fix type errors.\n\n\
-             TS2345: type error"
+            expected_block(
+                &[
+                    "  \u{2717} knip",
+                    "    Remove unused exports and dependencies.",
+                    "",
+                    "    Unused export",
+                    "",
+                    "  \u{2717} tsgo",
+                    "    Fix type errors.",
+                    "",
+                    "    TS2345: type error",
+                ],
+                2
+            )
         );
     }
 
@@ -342,14 +393,19 @@ mod tests {
             hint: "Fix type errors.",
             outcome: tools::GateOutcome::Failed(String::new()),
         };
-        let result = format_failures(&[&r1, &r2]);
+        let result = color::strip_ansi(&format_failures(&[&r1, &r2]));
         assert_eq!(
             result,
-            "2 gates failed. Fix all issues:\n\n\
-             ## knip\n\
-             Remove unused exports and dependencies.\n\n\
-             ## tsgo\n\
-             Fix type errors."
+            expected_block(
+                &[
+                    "  \u{2717} knip",
+                    "    Remove unused exports and dependencies.",
+                    "",
+                    "  \u{2717} tsgo",
+                    "    Fix type errors.",
+                ],
+                2
+            )
         );
     }
 
@@ -365,16 +421,23 @@ mod tests {
             hint: "Remove unused exports and dependencies.",
             outcome: tools::GateOutcome::Failed("Unused export".into()),
         };
-        let result = format_failures(&[&r1, &r2]);
+        let result = color::strip_ansi(&format_failures(&[&r1, &r2]));
         assert_eq!(
             result,
-            "2 gates failed. Fix all issues:\n\n\
-             ## custom\n\
-             Fix the issues:\n\n\
-             error\n\n\
-             ## knip\n\
-             Remove unused exports and dependencies.\n\n\
-             Unused export"
+            expected_block(
+                &[
+                    "  \u{2717} custom",
+                    "    Fix the issues:",
+                    "",
+                    "    error",
+                    "",
+                    "  \u{2717} knip",
+                    "    Remove unused exports and dependencies.",
+                    "",
+                    "    Unused export",
+                ],
+                2
+            )
         );
     }
 
@@ -455,7 +518,7 @@ mod tests {
         assert!(result.is_some());
         let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
         assert_eq!(json["decision"], "block");
-        assert!(json["reason"].as_str().unwrap().contains("knip failed"));
+        assert!(json["reason"].as_str().unwrap().contains("\u{2717} knip"));
     }
 
     #[test]

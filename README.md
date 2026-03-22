@@ -2,34 +2,29 @@
 
 # gates
 
-Stateful quality gates for Claude Code [completion hooks](https://docs.anthropic.com/en/docs/claude-code/hooks). Runs lint, type-check, test, knip, tsgo, litmus, and circular dependency detection in parallel, blocking agent completion on failure and enforcing a review phase before allowing completion.
+Quality gates for Claude Code [PostToolUse hooks](https://docs.anthropic.com/en/docs/claude-code/hooks). Runs lint, type-check, test, knip, tsgo, litmus, and circular dependency detection in parallel after each Write/Edit/MultiEdit, providing failure feedback to guide the agent.
 
 ## Features
 
-| Feature         | Description                                                         |
-| --------------- | ------------------------------------------------------------------- |
-| Parallel        | All enabled gates run concurrently on OS threads                    |
-| Fail-open       | Timeouts and missing binaries never block the agent                 |
-| Auto-detect     | Only runs gates relevant to the project (package.json, tsconfig)    |
-| Phase detection | Reads transcript to enforce fix → review → allow completion flow    |
-| Review gate     | Blocks with review instructions on first all-pass, allows on second |
-| Script gates    | Detects lint/type-check/test from package.json, auto-detects pm     |
-| Binary resolve  | Walks `node_modules/.bin` up to `.git` boundary                     |
-| 60s timeout     | SIGKILL to entire process group                                     |
+| Feature        | Description                                                      |
+| -------------- | ---------------------------------------------------------------- |
+| Parallel       | All enabled gates run concurrently on OS threads                 |
+| Fail-open      | Timeouts and missing binaries never block the agent              |
+| Auto-detect    | Only runs gates relevant to the project (package.json, tsconfig) |
+| Script gates   | Detects lint/type-check/test from package.json, auto-detects pm  |
+| Binary resolve | Walks `node_modules/.bin` up to `.git` boundary                  |
+| 60s timeout    | SIGKILL to entire process group                                  |
 
 ## How It Works
 
 ```text
-Agent stops → Stop hook fires → stdin JSON piped to gates binary
+Agent calls Write/Edit/MultiEdit → PostToolUse hook fires → gates binary runs
   ├─ Reads enabled gates from .claude/tools.json
   ├─ Detects project type (package.json, tsconfig.json, src/)
   ├─ Detects script gates (lint, type-check, test) from package.json
   ├─ Runs all matching gates in parallel on OS threads
-  ├─ Gate failure → blocks with fix instructions
-  └─ All gates pass →
-       ├─ Reads transcript for previous gates output
-       ├─ First all-pass → blocks with review instructions
-       └─ Second all-pass (after review) → allows completion
+  ├─ Gate failure → returns feedback with fix instructions
+  └─ All gates pass → no output (silent success)
 ```
 
 ## Gates
@@ -81,7 +76,7 @@ Missing tools are skipped (fail-open). A warning is printed to stderr if an enab
 
 ### Claude Code Plugin (recommended)
 
-Installs the binary and registers the Stop hook automatically.
+Installs the binary and registers the PostToolUse hook automatically.
 
 ```bash
 claude plugins marketplace add thkt/sentinels
@@ -130,8 +125,9 @@ Add to `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "Stop": [
+    "PostToolUse": [
       {
+        "matcher": "Write|Edit|MultiEdit",
         "hooks": [
           {
             "type": "command",
@@ -145,7 +141,7 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-When registered as a Stop hook, `gates` reads hook JSON from stdin (transcript path, stop_hook_active flag) and runs in the project directory automatically.
+When registered as a PostToolUse hook, `gates` runs after each file write/edit and provides failure feedback to the agent.
 
 ### Direct Execution
 
@@ -177,19 +173,6 @@ When no config file exists, all gates run by default. Once you create `.claude/t
     "type-check": true,
     "test": true
   }
-}
-```
-
-### Review Phase
-
-By default, when all gates pass for the first time, `gates` blocks with review instructions (code review, regression test verification, 5-step verification gate). On the second all-pass, completion is allowed.
-
-To disable the review phase:
-
-```json
-{
-  "gates": { "lint": true, "test": true },
-  "review": false
 }
 ```
 
@@ -234,7 +217,7 @@ brew install thkt/tap/guardrails thkt/tap/formatter thkt/tap/reviews thkt/tap/ga
 | [guardrails](https://github.com/thkt/guardrails) | PreToolUse  | Before Write/Edit | Lint + security checks             |
 | [formatter](https://github.com/thkt/formatter)   | PostToolUse | After Write/Edit  | Auto code formatting               |
 | [reviews](https://github.com/thkt/reviews)       | PreToolUse  | Before Skill      | Static analysis context injection  |
-| **gates**                                        | Stop        | Agent completion  | Quality gates + review enforcement |
+| **gates**                                        | PostToolUse | After Write/Edit  | Quality gates                      |
 
 See [thkt/tap](https://github.com/thkt/homebrew-tap) for setup details.
 
