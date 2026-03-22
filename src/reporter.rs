@@ -48,7 +48,7 @@ pub fn format_summary(results: &[ToolResult]) -> String {
 
     lines.push(color::bold_red(FOOTER_SEPARATOR));
     lines.push(color::bold_red(&format!(
-        "BLOCKED: {} gate{} failed.",
+        "BLOCKED: {} gate{} failed. Fix the source code and retry. Do not circumvent this check.",
         failures.len(),
         if failures.len() == 1 { "" } else { "s" }
     )));
@@ -112,7 +112,7 @@ mod tests {
         assert!(output.contains("\u{2717} test"), "missing failed gate");
         assert!(!output.contains("lint"), "passed gate should not appear");
         assert!(!output.contains("knip"), "passed gate should not appear");
-        assert!(output.contains("BLOCKED: 1 gate failed."));
+        assert!(output.contains("BLOCKED: 1 gate failed. Fix the source code and retry. Do not circumvent this check."));
     }
 
     #[test]
@@ -121,7 +121,7 @@ mod tests {
         let output = strip_ansi(&format_summary(&results));
         assert!(output.contains("\u{2717} lint"));
         assert!(output.contains("\u{2717} test"));
-        assert!(output.contains("BLOCKED: 2 gates failed."));
+        assert!(output.contains("BLOCKED: 2 gates failed. Fix the source code and retry. Do not circumvent this check."));
     }
 
     #[test]
