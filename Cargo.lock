@@ -123,7 +123,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "litmus"
 version = "0.2.0"
-source = "git+https://github.com/thkt/litmus.git#d48e4001a85fc0e2ac782563c4a0b4a9f31bb6d4"
+source = "git+https://github.com/thkt/litmus.git#c564e7a5c2d968d1c9d414d51a5e38602a468f05"
 dependencies = [
  "glob",
  "oxc_allocator 0.121.0",
