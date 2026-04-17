@@ -3,6 +3,7 @@ use oxc_ast::ast::Statement;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "target"];
@@ -39,7 +40,7 @@ fn path_display(path: &Path, base: &Path) -> String {
 }
 
 fn collect_source_files(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
@@ -64,7 +65,7 @@ fn build_graph(files: &[PathBuf]) -> HashMap<PathBuf, Vec<PathBuf>> {
     let mut graph = HashMap::new();
 
     for file in files {
-        let Ok(source) = std::fs::read_to_string(file) else {
+        let Ok(source) = fs::read_to_string(file) else {
             continue;
         };
         let specifiers = extract_import_specifiers(&source, file);

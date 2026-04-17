@@ -1,5 +1,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::fs;
+use std::io;
 use std::path::Path;
 
 const TOOLS_CONFIG_FILE: &str = ".claude/tools.json";
@@ -40,9 +42,9 @@ impl GatesConfig {
 
     pub fn load(project_dir: &Path) -> Self {
         let path = project_dir.join(TOOLS_CONFIG_FILE);
-        let content = match std::fs::read_to_string(&path) {
+        let content = match fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Self::default(),
             Err(e) => {
                 eprintln!("gates: failed to read {}: {}", path.display(), e);
                 return Self::default();
