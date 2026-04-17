@@ -1,3 +1,4 @@
+use crate::traverse;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -11,7 +12,7 @@ pub fn resolve_bin(name: &str, start: &Path) -> PathBuf {
     if name.contains('/') || name.contains("..") {
         return PathBuf::from(name);
     }
-    crate::traverse::walk_ancestors(start, |dir| {
+    traverse::walk_ancestors(start, |dir| {
         let candidate = dir.join("node_modules/.bin").join(name);
         is_executable(&candidate).then_some(candidate)
     })

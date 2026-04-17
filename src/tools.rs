@@ -1,9 +1,17 @@
+use crate::circular;
 use crate::project::ProjectInfo;
 use crate::resolve;
 use crate::sanitize;
+use std::collections::HashSet;
+use std::env;
+use std::fs;
+use std::io;
+use std::iter;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 const GATE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -114,15 +122,15 @@ pub struct EnvOverrides {
 impl EnvOverrides {
     pub fn from_env() -> Self {
         Self {
-            lint_cmd: std::env::var("LINT_CMD").ok().filter(|s| !s.is_empty()),
-            type_cmd: std::env::var("TYPE_CMD").ok().filter(|s| !s.is_empty()),
-            unit_cmd: std::env::var("UNIT_CMD").ok().filter(|s| !s.is_empty()),
-            test_cmd: std::env::var("TEST_CMD").ok().filter(|s| !s.is_empty()),
+            lint_cmd: env::var("LINT_CMD").ok().filter(|s| !s.is_empty()),
+            type_cmd: env::var("TYPE_CMD").ok().filter(|s| !s.is_empty()),
+            unit_cmd: env::var("UNIT_CMD").ok().filter(|s| !s.is_empty()),
+            test_cmd: env::var("TEST_CMD").ok().filter(|s| !s.is_empty()),
         }
     }
 }
 
-fn detect_run_prefix(project_dir: &std::path::Path) -> Option<String> {
+fn detect_run_prefix(project_dir: &Path) -> Option<String> {
     let candidates: &[(&str, &str)] = &[
         ("pnpm-lock.yaml", "pnpm run"),
         ("bun.lock", "bun run"),
@@ -139,7 +147,7 @@ fn detect_run_prefix(project_dir: &std::path::Path) -> Option<String> {
 
 pub fn detect_script_gates_with_overrides(
     overrides: &EnvOverrides,
-    project_dir: &std::path::Path,
+    project_dir: &Path,
 ) -> Vec<ScriptGate> {
     let run_prefix = detect_run_prefix(project_dir);
     detect_script_gates_inner(overrides, project_dir, run_prefix.as_deref())
@@ -147,7 +155,7 @@ pub fn detect_script_gates_with_overrides(
 
 fn detect_script_gates_inner(
     overrides: &EnvOverrides,
-    project_dir: &std::path::Path,
+    project_dir: &Path,
     run_prefix: Option<&str>,
 ) -> Vec<ScriptGate> {
     let mut gates = Vec::new();
@@ -231,7 +239,7 @@ fn detect_script_gates_inner(
 
 /// Run script gates with type-check → test cascade logic.
 /// lint runs independently; if type-check fails, test is skipped.
-pub fn run_script_gates(gates: &[ScriptGate], project_dir: &std::path::Path) -> Vec<ToolResult> {
+pub fn run_script_gates(gates: &[ScriptGate], project_dir: &Path) -> Vec<ToolResult> {
     let mut results = Vec::new();
 
     let lint = gates.iter().find(|g| g.name == "lint");
@@ -242,7 +250,7 @@ pub fn run_script_gates(gates: &[ScriptGate], project_dir: &std::path::Path) -> 
         let cmd_str = g.command.clone();
         let hint = g.hint;
         let dir = project_dir.to_path_buf();
-        std::thread::spawn(move || run_shell_command("lint", &cmd_str, hint, &dir))
+        thread::spawn(move || run_shell_command("lint", &cmd_str, hint, &dir))
     });
 
     if let Some(tc) = type_check {
@@ -265,7 +273,7 @@ pub fn run_script_gates(gates: &[ScriptGate], project_dir: &std::path::Path) -> 
         match handle.join() {
             Ok(r) => results.push(r),
             Err(e) => {
-                eprintln!("gates: lint thread panicked: {:?}", e);
+                eprintln!("gates: lint thread panicked: {e:?}");
                 results.push(ToolResult::skipped("lint"));
             }
         }
@@ -278,34 +286,34 @@ fn run_shell_command(
     name: &'static str,
     cmd_str: &str,
     hint: &'static str,
-    project_dir: &std::path::Path,
+    project_dir: &Path,
 ) -> ToolResult {
     let mut cmd = Command::new("sh");
     cmd.args(["-c", cmd_str]).current_dir(project_dir);
-    let label = cmd_str.to_string();
+    let label = cmd_str.to_owned();
     let mut result = run_command_with_label(name, cmd, GATE_TIMEOUT, Some(&label));
     result.hint = hint;
     result
 }
 
-fn read_package_scripts(project_dir: &std::path::Path) -> std::collections::HashSet<String> {
+fn read_package_scripts(project_dir: &Path) -> HashSet<String> {
     let path = project_dir.join("package.json");
-    let content = match std::fs::read_to_string(&path) {
+    let content = match fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return std::collections::HashSet::new();
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return HashSet::new();
         }
         Err(e) => {
             eprintln!("gates: failed to read {}: {}", path.display(), e);
-            return std::collections::HashSet::new();
+            return HashSet::new();
         }
     };
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) else {
         eprintln!("gates: failed to parse {}", path.display());
-        return std::collections::HashSet::new();
+        return HashSet::new();
     };
     let Some(scripts) = parsed.get("scripts").and_then(|v| v.as_object()) else {
-        return std::collections::HashSet::new();
+        return HashSet::new();
     };
     scripts.keys().cloned().collect()
 }
@@ -315,11 +323,7 @@ pub fn gate_by_name(name: &str) -> &'static GateDefinition {
     GATES
         .iter()
         .find(|g| g.name == name)
-        .unwrap_or_else(|| panic!("gate '{}' not found", name))
-}
-
-unsafe extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
+        .unwrap_or_else(|| panic!("gate '{name}' not found"))
 }
 
 fn kill_process_group(pid: u32) {
@@ -328,20 +332,23 @@ fn kill_process_group(pid: u32) {
         return;
     }
     let Ok(pid_i32) = i32::try_from(pid) else {
-        eprintln!(
-            "gates: pid {} exceeds i32::MAX, cannot kill process group",
-            pid
-        );
+        eprintln!("gates: pid {pid} exceeds i32::MAX, cannot kill process group");
         return;
     };
-    // SAFETY: pid_i32 > 0 validated above; -pid targets the process group.
-    let ret = unsafe { kill(-pid_i32, 9) };
-    if ret != 0 {
-        eprintln!(
-            "gates: failed to kill process group {}: {}",
-            pid,
-            std::io::Error::last_os_error()
-        );
+    let target = format!("-{pid_i32}");
+    let status = Command::new("kill")
+        .args(["-9", &target])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(s) if !s.success() => {
+            eprintln!("gates: kill exited {s} for process group {pid}");
+        }
+        Err(e) => {
+            eprintln!("gates: failed to kill process group {pid}: {e}");
+        }
+        _ => {}
     }
 }
 
@@ -361,12 +368,12 @@ fn run_command_with_label(
         Ok(c) => c,
         Err(e) => {
             match e.kind() {
-                std::io::ErrorKind::NotFound => {}
-                std::io::ErrorKind::PermissionDenied => {
-                    eprintln!("gates: {} binary found but not executable: {}", name, e);
+                io::ErrorKind::NotFound => {}
+                io::ErrorKind::PermissionDenied => {
+                    eprintln!("gates: {name} binary found but not executable: {e}");
                 }
                 _ => {
-                    eprintln!("gates: {} spawn error: {}", name, e);
+                    eprintln!("gates: {name} spawn error: {e}");
                 }
             }
             return ToolResult::skipped(name);
@@ -376,7 +383,7 @@ fn run_command_with_label(
     let pid = child.id();
     let (tx, rx) = mpsc::channel();
 
-    std::thread::spawn(move || {
+    thread::spawn(move || {
         let result = child.wait_with_output();
         let _ = tx.send(result);
     });
@@ -390,11 +397,11 @@ fn run_command_with_label(
             } else if stdout.is_empty() {
                 stderr.into_owned()
             } else {
-                format!("{}\n{}", stdout, stderr)
+                format!("{stdout}\n{stderr}")
             };
             let sanitized = sanitize::sanitize(&combined);
             let truncated = sanitize::tail_lines(&sanitized, MAX_OUTPUT_LINES);
-            let text = truncated.trim().to_string();
+            let text = truncated.trim().to_owned();
 
             let outcome = if output.status.success() {
                 GateOutcome::Passed
@@ -408,7 +415,7 @@ fn run_command_with_label(
             }
         }
         Ok(Err(e)) => {
-            eprintln!("gates: {} output read error: {}", name, e);
+            eprintln!("gates: {name} output read error: {e}");
             ToolResult::skipped(name)
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -427,7 +434,7 @@ fn run_command_with_label(
             ToolResult::skipped(name)
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            eprintln!("gates: {} wait thread disconnected", name);
+            eprintln!("gates: {name} wait thread disconnected");
             ToolResult::skipped(name)
         }
     }
@@ -453,7 +460,7 @@ pub fn run_litmus(project: &ProjectInfo) -> ToolResult {
         return ToolResult::passed("litmus");
     }
 
-    let output: Vec<String> = result.issues.iter().map(|i| i.to_string()).collect();
+    let output: Vec<String> = result.issues.iter().map(ToString::to_string).collect();
     let truncated = sanitize::tail_lines(&output.join("\n"), MAX_OUTPUT_LINES);
 
     ToolResult {
@@ -469,7 +476,7 @@ pub fn run_circular(project: &ProjectInfo) -> ToolResult {
         return ToolResult::skipped("circular");
     }
 
-    let result = crate::circular::detect(&src_dir);
+    let result = circular::detect(&src_dir);
 
     if result.cycles.is_empty() {
         return ToolResult::passed("circular");
@@ -488,7 +495,7 @@ pub fn run_circular(project: &ProjectInfo) -> ToolResult {
             cycle
                 .iter()
                 .map(String::as_str)
-                .chain(std::iter::once(cycle[0].as_str()))
+                .chain(iter::once(cycle[0].as_str()))
                 .collect::<Vec<_>>()
                 .join(" → ")
         })

@@ -1,6 +1,8 @@
+use std::env;
+use std::sync::LazyLock;
+
 fn use_color() -> bool {
-    static COLOR: std::sync::LazyLock<bool> =
-        std::sync::LazyLock::new(|| std::env::var_os("NO_COLOR").is_none());
+    static COLOR: LazyLock<bool> = LazyLock::new(|| env::var_os("NO_COLOR").is_none());
     *COLOR
 }
 
@@ -8,7 +10,7 @@ fn wrap(ansi_code: &str, text: &str) -> String {
     if use_color() {
         format!("\x1b[{ansi_code}m{text}\x1b[0m")
     } else {
-        text.to_string()
+        text.to_owned()
     }
 }
 

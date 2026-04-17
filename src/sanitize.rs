@@ -7,11 +7,7 @@ static MULTI_BLANK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unw
 pub fn sanitize(input: &str) -> String {
     let s = ANSI_RE.replace_all(input, "");
 
-    let s: String = s
-        .lines()
-        .map(|line| line.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let s: String = s.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
 
     let s = MULTI_BLANK.replace_all(&s, "\n\n");
 
@@ -21,7 +17,7 @@ pub fn sanitize(input: &str) -> String {
 pub fn tail_lines(s: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = s.lines().collect();
     if lines.len() <= max_lines {
-        return s.to_string();
+        return s.to_owned();
     }
     let skipped = lines.len() - max_lines;
     format!(

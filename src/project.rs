@@ -1,3 +1,4 @@
+use crate::traverse;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -21,7 +22,7 @@ impl ProjectInfo {
     }
 
     fn find_root(start: &Path) -> PathBuf {
-        crate::traverse::walk_ancestors(start, |dir| {
+        traverse::walk_ancestors(start, |dir| {
             dir.join(".git").exists().then(|| dir.to_path_buf())
         })
         .unwrap_or_else(|| start.to_path_buf())

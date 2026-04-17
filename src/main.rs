@@ -10,7 +10,10 @@ mod test_utils;
 mod tools;
 mod traverse;
 
+use std::env;
 use std::path::Path;
+use std::process;
+use std::thread;
 
 const CONFIG_HINT: &str = "Gates: using defaults. Customize via .claude/tools.json \u{2014} see https://github.com/thkt/gates#configuration";
 
@@ -73,10 +76,10 @@ fn format_failures(failures: &[&tools::ToolResult]) -> String {
 }
 
 fn run(project_dir: &Path) -> Option<String> {
-    run_with_overrides(project_dir, tools::EnvOverrides::from_env())
+    run_with_overrides(project_dir, &tools::EnvOverrides::from_env())
 }
 
-fn run_with_overrides(project_dir: &Path, overrides: tools::EnvOverrides) -> Option<String> {
+fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Option<String> {
     let config = config::GatesConfig::load(project_dir);
 
     if should_show_hint(project_dir, &config) {
@@ -99,7 +102,7 @@ fn run_with_overrides(project_dir: &Path, overrides: tools::EnvOverrides) -> Opt
             hint: "Fix test failures.",
         }]
     } else {
-        tools::detect_script_gates_with_overrides(&overrides, project_dir)
+        tools::detect_script_gates_with_overrides(overrides, project_dir)
             .into_iter()
             .filter(|g| config.is_enabled(g.name))
             .collect()
@@ -123,21 +126,21 @@ fn run_with_overrides(project_dir: &Path, overrides: tools::EnvOverrides) -> Opt
             let name = gate.name;
             (
                 name,
-                std::thread::spawn(move || tools::run_gate(&tools::GATES[idx], &p)),
+                thread::spawn(move || tools::run_gate(&tools::GATES[idx], &p)),
             )
         })
         .collect();
 
     let litmus_handle = if litmus_enabled {
         let p = project.clone();
-        Some(std::thread::spawn(move || tools::run_litmus(&p)))
+        Some(thread::spawn(move || tools::run_litmus(&p)))
     } else {
         None
     };
 
     let circular_handle = if circular_enabled {
         let p = project.clone();
-        Some(std::thread::spawn(move || tools::run_circular(&p)))
+        Some(thread::spawn(move || tools::run_circular(&p)))
     } else {
         None
     };
@@ -145,7 +148,7 @@ fn run_with_overrides(project_dir: &Path, overrides: tools::EnvOverrides) -> Opt
     let script_gate_names: Vec<&'static str> = script_gates.iter().map(|g| g.name).collect();
     let script_handle = if !script_gates.is_empty() {
         let dir = project_dir.to_path_buf();
-        Some(std::thread::spawn(move || {
+        Some(thread::spawn(move || {
             tools::run_script_gates(&script_gates, &dir)
         }))
     } else {
@@ -236,21 +239,21 @@ fn warn_missing_tools(results: &[tools::ToolResult], project: &project::ProjectI
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = env::args().collect();
     if args.len() > 2 {
         eprintln!("usage: gates [project_dir]");
-        std::process::exit(1);
+        process::exit(1);
     }
 
     let dir = args.get(1).map(String::as_str).unwrap_or(".");
     let project_dir = Path::new(dir);
     if !project_dir.is_dir() {
         eprintln!("gates: not a directory: {}", project_dir.display());
-        std::process::exit(1);
+        process::exit(1);
     }
 
     if let Some(json) = run(project_dir) {
-        println!("{}", json);
+        println!("{json}");
     }
 }
 
@@ -532,7 +535,7 @@ mod tests {
 
         let result = run_with_overrides(
             &tmp,
-            tools::EnvOverrides {
+            &tools::EnvOverrides {
                 lint_cmd: Some("true".into()),
                 ..Default::default()
             },
@@ -555,7 +558,7 @@ mod tests {
 
         let result = run_with_overrides(
             &tmp,
-            tools::EnvOverrides {
+            &tools::EnvOverrides {
                 test_cmd: Some("sh -c 'echo legacy-fail && exit 1'".into()),
                 ..Default::default()
             },
@@ -586,7 +589,7 @@ mod tests {
 
         let result = run_with_overrides(
             &tmp,
-            tools::EnvOverrides {
+            &tools::EnvOverrides {
                 lint_cmd: Some("sh -c 'echo lint-error && exit 1'".into()),
                 ..Default::default()
             },
