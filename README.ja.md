@@ -2,7 +2,7 @@
 
 # gates
 
-Claude Codeの[PostToolUseフック](https://docs.anthropic.com/en/docs/claude-code/hooks)用品質ゲート。lint・type-check・test・knip・tsgo・litmus・循環依存検出をWrite/Edit/MultiEditのたびに並列実行し、失敗時にエージェントへフィードバックを返します。
+Claude Codeの[PostToolUseフック](https://docs.anthropic.com/en/docs/claude-code/hooks)用品質ゲート。lint・type-check・test・knip・tsgo・dependency-cruiser・litmus・循環依存検出をWrite/Edit/MultiEditのたびに並列実行し、失敗時にエージェントへフィードバックを返します。
 
 ## 特徴
 
@@ -33,10 +33,11 @@ Claude Codeの[PostToolUseフック](https://docs.anthropic.com/en/docs/claude-c
 
 `node_modules/.bin` から解決し、見つからなければ `$PATH` にフォールバックします。
 
-| ゲート | 条件                 | 引数     |
-| ------ | -------------------- | -------- |
-| knip   | `package.json` あり  | （なし） |
-| tsgo   | `tsconfig.json` あり | （なし） |
+| ゲート    | 条件                                         | 引数     |
+| --------- | -------------------------------------------- | -------- |
+| knip      | `package.json` あり                          | （なし） |
+| tsgo      | `tsconfig.json` あり                         | （なし） |
+| depcruise | `.dependency-cruiser.{js,cjs,mjs,json}` あり | `src/`   |
 
 ### 組み込みゲート
 
@@ -63,10 +64,11 @@ Claude Codeの[PostToolUseフック](https://docs.anthropic.com/en/docs/claude-c
 
 使いたいゲートに対応するツールをインストールしてください。
 
-| ツール                                             | インストール                                |
-| -------------------------------------------------- | ------------------------------------------- |
-| [knip](https://knip.dev)                           | `npm i -D knip`（プロジェクトローカル推奨） |
-| [tsgo](https://github.com/microsoft/typescript-go) | `npm i -g @typescript/native-preview`       |
+| ツール                                                               | インストール                                              |
+| -------------------------------------------------------------------- | --------------------------------------------------------- |
+| [knip](https://knip.dev)                                             | `npm i -D knip`（プロジェクトローカル推奨）               |
+| [tsgo](https://github.com/microsoft/typescript-go)                   | `npm i -g @typescript/native-preview`                     |
+| [dependency-cruiser](https://github.com/sverweij/dependency-cruiser) | `npm i -D dependency-cruiser`（プロジェクトローカル推奨） |
 
 [litmus](https://github.com/thkt/litmus) と循環依存検出は `gates` バイナリに内蔵されています。個別インストールは不要です。
 
@@ -167,6 +169,7 @@ gates /path/to/project  # ディレクトリを明示指定
   "gates": {
     "knip": true,
     "tsgo": true,
+    "depcruise": true,
     "circular": true,
     "litmus": true,
     "lint": true,
