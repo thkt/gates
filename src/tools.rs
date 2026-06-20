@@ -103,6 +103,20 @@ pub const GATES: &[GateDefinition] = &[
         hint: "Fix type errors.",
         condition: |p| p.has_tsconfig,
     },
+    // dependency-cruiser auto-detects .dependency-cruiser.{js,cjs,mjs,json} since v13,
+    // so --config is omitted; the condition gates on the same four formats it detects.
+    // https://github.com/sverweij/dependency-cruiser/blob/main/doc/cli.md
+    GateDefinition {
+        name: "depcruise",
+        command: "dependency-cruiser",
+        args: &["src/"],
+        hint: "Fix architecture boundary violations.",
+        condition: |p| {
+            ["js", "cjs", "mjs", "json"]
+                .iter()
+                .any(|ext| p.root.join(format!(".dependency-cruiser.{ext}")).exists())
+        },
+    },
 ];
 
 pub struct ScriptGate {
@@ -733,6 +747,64 @@ mod tests {
 
         assert!(!(gate_by_name("tsgo").condition)(&pkg_only));
         assert!((gate_by_name("tsgo").condition)(&ts_only));
+    }
+
+    fn depcruise_project_with(config: Option<&str>) -> (TempDir, ProjectInfo) {
+        let tmp = TempDir::new("depcruise");
+        fs::create_dir_all(tmp.join(".git")).unwrap();
+        if let Some(name) = config {
+            fs::write(tmp.join(name), "module.exports = {};").unwrap();
+        }
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: false,
+            has_tsconfig: false,
+        };
+        (tmp, project)
+    }
+
+    #[test]
+    fn depcruise_condition_true_with_js_config() {
+        let (_tmp, project) = depcruise_project_with(Some(".dependency-cruiser.js"));
+        assert!((gate_by_name("depcruise").condition)(&project));
+    }
+
+    #[test]
+    fn depcruise_condition_true_with_cjs_config() {
+        let (_tmp, project) = depcruise_project_with(Some(".dependency-cruiser.cjs"));
+        assert!((gate_by_name("depcruise").condition)(&project));
+    }
+
+    #[test]
+    fn depcruise_condition_true_with_mjs_config() {
+        let (_tmp, project) = depcruise_project_with(Some(".dependency-cruiser.mjs"));
+        assert!((gate_by_name("depcruise").condition)(&project));
+    }
+
+    #[test]
+    fn depcruise_condition_true_with_json_config() {
+        let (_tmp, project) = depcruise_project_with(Some(".dependency-cruiser.json"));
+        assert!((gate_by_name("depcruise").condition)(&project));
+    }
+
+    #[test]
+    fn depcruise_condition_false_without_config() {
+        let (_tmp, project) = depcruise_project_with(None);
+        assert!(!(gate_by_name("depcruise").condition)(&project));
+    }
+
+    #[test]
+    fn depcruise_skips_without_config() {
+        let (_tmp, project) = depcruise_project_with(None);
+        let result = run_gate(gate_by_name("depcruise"), &project);
+        assert!(result.is_skipped(), "depcruise should skip without config");
+    }
+
+    #[test]
+    fn depcruise_definition_uses_auto_detect() {
+        let gate = gate_by_name("depcruise");
+        assert_eq!(gate.command, "dependency-cruiser");
+        assert_eq!(gate.args, &["src/"]);
     }
 
     #[test]

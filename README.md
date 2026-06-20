@@ -2,7 +2,7 @@
 
 # gates
 
-Quality gates for Claude Code [PostToolUse hooks](https://docs.anthropic.com/en/docs/claude-code/hooks). Runs lint, type-check, test, knip, tsgo, litmus, and circular dependency detection in parallel after each Write/Edit/MultiEdit, providing failure feedback to guide the agent.
+Quality gates for Claude Code [PostToolUse hooks](https://docs.anthropic.com/en/docs/claude-code/hooks). Runs lint, type-check, test, knip, tsgo, dependency-cruiser, litmus, and circular dependency detection in parallel after each Write/Edit/MultiEdit, providing failure feedback to guide the agent.
 
 ## Features
 
@@ -33,10 +33,11 @@ Agent calls Write/Edit/MultiEdit → PostToolUse hook fires → gates binary run
 
 Resolved from `node_modules/.bin`, falling back to `$PATH`.
 
-| Gate | Condition              | Args   |
-| ---- | ---------------------- | ------ |
-| knip | `package.json` exists  | (none) |
-| tsgo | `tsconfig.json` exists | (none) |
+| Gate      | Condition                                      | Args   |
+| --------- | ---------------------------------------------- | ------ |
+| knip      | `package.json` exists                          | (none) |
+| tsgo      | `tsconfig.json` exists                         | (none) |
+| depcruise | `.dependency-cruiser.{js,cjs,mjs,json}` exists | `src/` |
 
 ### Embedded Gates
 
@@ -63,10 +64,11 @@ When no lock file is found, script gates are silently skipped (fail-open). Envir
 
 Install the tools for the gates you want to use.
 
-| Tool                                               | Install                               |
-| -------------------------------------------------- | ------------------------------------- |
-| [knip](https://knip.dev)                           | `npm i -D knip` (project-local)       |
-| [tsgo](https://github.com/microsoft/typescript-go) | `npm i -g @typescript/native-preview` |
+| Tool                                                                 | Install                                       |
+| -------------------------------------------------------------------- | --------------------------------------------- |
+| [knip](https://knip.dev)                                             | `npm i -D knip` (project-local)               |
+| [tsgo](https://github.com/microsoft/typescript-go)                   | `npm i -g @typescript/native-preview`         |
+| [dependency-cruiser](https://github.com/sverweij/dependency-cruiser) | `npm i -D dependency-cruiser` (project-local) |
 
 [litmus](https://github.com/thkt/litmus) and circular dependency detection are embedded in the `gates` binary — no separate installation needed.
 
@@ -167,6 +169,7 @@ When no config file exists, all gates run by default. Once you create `.claude/t
   "gates": {
     "knip": true,
     "tsgo": true,
+    "depcruise": true,
     "circular": true,
     "litmus": true,
     "lint": true,
@@ -212,12 +215,12 @@ different phase — install the full suite for comprehensive coverage:
 brew install thkt/tap/guardrails thkt/tap/formatter thkt/tap/reviews thkt/tap/gates
 ```
 
-| Tool                                             | Hook        | Timing            | Role                               |
-| ------------------------------------------------ | ----------- | ----------------- | ---------------------------------- |
-| [guardrails](https://github.com/thkt/guardrails) | PreToolUse  | Before Write/Edit | Lint + security checks             |
-| [formatter](https://github.com/thkt/formatter)   | PostToolUse | After Write/Edit  | Auto code formatting               |
-| [reviews](https://github.com/thkt/reviews)       | PreToolUse  | Before Skill      | Static analysis context injection  |
-| **gates**                                        | PostToolUse | After Write/Edit  | Quality gates                      |
+| Tool                                             | Hook        | Timing            | Role                              |
+| ------------------------------------------------ | ----------- | ----------------- | --------------------------------- |
+| [guardrails](https://github.com/thkt/guardrails) | PreToolUse  | Before Write/Edit | Lint + security checks            |
+| [formatter](https://github.com/thkt/formatter)   | PostToolUse | After Write/Edit  | Auto code formatting              |
+| [reviews](https://github.com/thkt/reviews)       | PreToolUse  | Before Skill      | Static analysis context injection |
+| **gates**                                        | PostToolUse | After Write/Edit  | Quality gates                     |
 
 See [thkt/tap](https://github.com/thkt/homebrew-tap) for setup details.
 
