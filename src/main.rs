@@ -1,6 +1,8 @@
 mod circular;
 mod color;
 mod config;
+mod coupling;
+mod depgraph;
 mod project;
 mod reporter;
 mod resolve;
@@ -110,11 +112,13 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
 
     let litmus_enabled = config.is_enabled("litmus");
     let circular_enabled = config.is_enabled("circular");
+    let coupling_enabled = config.is_enabled("coupling");
 
     let total_enabled = enabled.len()
         + script_gates.len()
         + usize::from(litmus_enabled)
-        + usize::from(circular_enabled);
+        + usize::from(circular_enabled)
+        + usize::from(coupling_enabled);
     if total_enabled == 0 {
         return None;
     }
@@ -138,9 +142,12 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
         None
     };
 
-    let circular_handle = if circular_enabled {
+    let ca_threshold = config.coupling_ca_threshold;
+    let graph_handle = if circular_enabled || coupling_enabled {
         let p = project.clone();
-        Some(thread::spawn(move || tools::run_circular(&p)))
+        Some(thread::spawn(move || {
+            tools::run_graph_gates(&p, circular_enabled, coupling_enabled, ca_threshold)
+        }))
     } else {
         None
     };
@@ -166,13 +173,26 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
         })
         .collect();
 
-    for (name, handle) in [("litmus", litmus_handle), ("circular", circular_handle)] {
-        if let Some(h) = handle {
-            match h.join() {
-                Ok(result) => results.push(result),
-                Err(e) => {
-                    eprintln!("gates: {name} thread panicked: {e:?}");
-                    results.push(tools::ToolResult::skipped(name));
+    if let Some(h) = litmus_handle {
+        match h.join() {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                eprintln!("gates: litmus thread panicked: {e:?}");
+                results.push(tools::ToolResult::skipped("litmus"));
+            }
+        }
+    }
+
+    if let Some(h) = graph_handle {
+        match h.join() {
+            Ok(graph_results) => results.extend(graph_results),
+            Err(e) => {
+                eprintln!("gates: graph gates thread panicked: {e:?}");
+                if circular_enabled {
+                    results.push(tools::ToolResult::skipped("circular"));
+                }
+                if coupling_enabled {
+                    results.push(tools::ToolResult::skipped("coupling"));
                 }
             }
         }

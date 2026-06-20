@@ -2,7 +2,7 @@
 
 # gates
 
-Quality gates for Claude Code [PostToolUse hooks](https://docs.anthropic.com/en/docs/claude-code/hooks). Runs lint, type-check, test, knip, tsgo, dependency-cruiser, litmus, and circular dependency detection in parallel after each Write/Edit/MultiEdit, providing failure feedback to guide the agent.
+Quality gates for Claude Code [PostToolUse hooks](https://docs.anthropic.com/en/docs/claude-code/hooks). Runs lint, type-check, test, knip, tsgo, dependency-cruiser, litmus, circular dependency detection, and coupling metrics in parallel after each Write/Edit/MultiEdit, providing failure feedback to guide the agent.
 
 ## Features
 
@@ -43,10 +43,11 @@ Resolved from `node_modules/.bin`, falling back to `$PATH`.
 
 Built into the `gates` binary. No separate installation required.
 
-| Gate     | Condition                               | Detects                                           |
-| -------- | --------------------------------------- | ------------------------------------------------- |
-| litmus   | `package.json` + `*.test.ts/tsx` exists | Weak assertions, mock overuse, tautological tests |
-| circular | `package.json` + `src/` exists          | Circular import dependencies (oxc-based AST)      |
+| Gate     | Condition                                            | Detects                                                            |
+| -------- | ---------------------------------------------------- | ------------------------------------------------------------------ |
+| litmus   | `package.json` + `*.test.ts/tsx` exists              | Weak assertions, mock overuse, tautological tests                  |
+| circular | `package.json` + `src/` exists                       | Circular import dependencies (oxc-based AST)                       |
+| coupling | `package.json` + `src/` + `coupling.caThreshold` set | God modules (Ca > threshold) via Ca/Ce/instability (oxc-based AST) |
 
 ### Script Gates
 
@@ -171,11 +172,23 @@ When no config file exists, all gates run by default. Once you create `.claude/t
     "tsgo": true,
     "depcruise": true,
     "circular": true,
+    "coupling": true,
     "litmus": true,
     "lint": true,
     "type-check": true,
     "test": true
   }
+}
+```
+
+### Coupling Threshold
+
+The coupling gate flags God modules whose afferent coupling (Ca, the number of intra-project files importing it) exceeds `coupling.caThreshold`. It lives outside the `gates` key because that key only accepts booleans. There is no universal default, so the gate reports nothing until a threshold is set. Derive one from a high percentile (for example P90-P95) of the repository's Ca distribution.
+
+```json
+{
+  "gates": { "coupling": true },
+  "coupling": { "caThreshold": 20 }
 }
 ```
 

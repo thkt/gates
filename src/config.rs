@@ -15,6 +15,7 @@ pub enum ConfigSource {
 #[derive(Debug, PartialEq)]
 pub struct GatesConfig {
     pub gates: Option<HashMap<String, bool>>,
+    pub coupling_ca_threshold: Option<usize>,
     pub source: ConfigSource,
 }
 
@@ -22,6 +23,7 @@ impl Default for GatesConfig {
     fn default() -> Self {
         Self {
             gates: None,
+            coupling_ca_threshold: None,
             source: ConfigSource::Default,
         }
     }
@@ -30,6 +32,13 @@ impl Default for GatesConfig {
 #[derive(Deserialize)]
 struct ToolsJson {
     gates: Option<HashMap<String, serde_json::Value>>,
+    coupling: Option<CouplingSection>,
+}
+
+#[derive(Deserialize)]
+struct CouplingSection {
+    #[serde(rename = "caThreshold")]
+    ca_threshold: Option<usize>,
 }
 
 impl GatesConfig {
@@ -57,9 +66,11 @@ impl GatesConfig {
                 return Self::default();
             }
         };
+        let coupling_ca_threshold = parsed.coupling.and_then(|c| c.ca_threshold);
         let Some(gates_map) = parsed.gates else {
             return Self {
                 gates: None,
+                coupling_ca_threshold,
                 source: ConfigSource::Explicit,
             };
         };
@@ -79,6 +90,7 @@ impl GatesConfig {
         }
         Self {
             gates: Some(gates),
+            coupling_ca_threshold,
             source: ConfigSource::Explicit,
         }
     }
@@ -150,6 +162,43 @@ mod tests {
         let config = GatesConfig::load(&dir);
         assert!(config.is_enabled("test-quality"));
         assert!(!config.is_enabled("my-custom-gate"));
+    }
+
+    // T-501: coupling.caThreshold is read into coupling_ca_threshold.
+    #[test]
+    fn reads_coupling_ca_threshold() {
+        let dir = setup_dir(Some(r#"{"coupling":{"caThreshold":20}}"#));
+        let config = GatesConfig::load(&dir);
+        assert_eq!(config.coupling_ca_threshold, Some(20));
+    }
+
+    // T-502: absent coupling section yields no threshold.
+    #[test]
+    fn missing_coupling_section_yields_none() {
+        let dir = setup_dir(Some(r#"{"gates":{"knip":true}}"#));
+        let config = GatesConfig::load(&dir);
+        assert_eq!(config.coupling_ca_threshold, None);
+    }
+
+    // T-503: disabling coupling via gates does not imply a threshold.
+    #[test]
+    fn coupling_disabled_has_no_threshold() {
+        let dir = setup_dir(Some(r#"{"gates":{"coupling":false}}"#));
+        let config = GatesConfig::load(&dir);
+        assert!(!config.is_enabled("coupling"));
+        assert_eq!(config.coupling_ca_threshold, None);
+    }
+
+    // T-504: gates booleans and coupling threshold coexist without interference.
+    #[test]
+    fn gates_and_coupling_coexist() {
+        let dir = setup_dir(Some(
+            r#"{"gates":{"knip":true,"coupling":true},"coupling":{"caThreshold":15}}"#,
+        ));
+        let config = GatesConfig::load(&dir);
+        assert!(config.is_enabled("knip"));
+        assert!(config.is_enabled("coupling"));
+        assert_eq!(config.coupling_ca_threshold, Some(15));
     }
 
     #[test]
