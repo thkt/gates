@@ -1,4 +1,5 @@
 use crate::circular;
+use crate::clone;
 use crate::coupling;
 use crate::depgraph;
 use crate::project::ProjectInfo;
@@ -10,7 +11,7 @@ use std::fs;
 use std::io;
 use std::iter;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -590,6 +591,77 @@ fn coupling_result(
     )
 }
 
+/// Number of clone groups to list in the failure report before truncating.
+const MAX_REPORTED_GROUPS: usize = 10;
+
+/// Detect Type 1/2 structural clones across the project's `src` tree and block
+/// when the number of clone groups reaches `block_threshold`.
+pub fn run_clone(
+    project: &ProjectInfo,
+    min_nodes: usize,
+    min_lines: usize,
+    block_threshold: usize,
+) -> ToolResult {
+    let src_dir = project.root.join("src");
+    if !project.has_package_json || !src_dir.is_dir() {
+        return ToolResult::skipped("clone");
+    }
+
+    // Declaration files (`*.d.ts`) carry only type shapes, which the gate's
+    // "extract into a shared function" remedy cannot address, so exclude them.
+    let files: Vec<PathBuf> = depgraph::collect_files(&src_dir)
+        .into_iter()
+        .filter(|p| !p.to_string_lossy().ends_with(".d.ts"))
+        .collect();
+    if files.is_empty() {
+        return ToolResult::skipped("clone");
+    }
+
+    let result = clone::analyze(&files, &src_dir, min_nodes, min_lines);
+    if result.groups.len() < block_threshold {
+        return ToolResult::passed("clone");
+    }
+
+    ToolResult::failed(
+        "clone",
+        "Extract the duplicated structures into a shared function or module (DRY).",
+        &clone_report(&result.groups),
+    )
+}
+
+fn clone_report(groups: &[clone::CloneGroup]) -> String {
+    let n = groups.len();
+    let header = format!(
+        "Found {n} structural clone group{}:",
+        if n == 1 { "" } else { "s" }
+    );
+    let mut lines = vec![header];
+    for (i, group) in groups.iter().take(MAX_REPORTED_GROUPS).enumerate() {
+        let kind = if group.exact {
+            "Type 1 (exact)"
+        } else {
+            "Type 2 (structural)"
+        };
+        lines.push(format!(
+            "#{} {} — {} copies, {} nodes",
+            i + 1,
+            kind,
+            group.instances.len(),
+            group.node_count
+        ));
+        for inst in &group.instances {
+            lines.push(format!(
+                "    {}:{}-{}",
+                inst.path, inst.start_line, inst.end_line
+            ));
+        }
+    }
+    if n > MAX_REPORTED_GROUPS {
+        lines.push(format!("... and {} more group(s)", n - MAX_REPORTED_GROUPS));
+    }
+    lines.join("\n")
+}
+
 pub fn run_gate(gate: &GateDefinition, project: &ProjectInfo) -> ToolResult {
     if !(gate.condition)(project) {
         return ToolResult::skipped(gate.name);
@@ -1153,5 +1225,90 @@ test('works', () => {
         let cmd = Command::new("nonexistent-binary-99999");
         let result = run_command("missing", cmd, Duration::from_secs(5));
         assert!(result.is_skipped());
+    }
+
+    fn clone_project(files: &[(&str, &str)]) -> TempDir {
+        let tmp = TempDir::new("clone-gate");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        let src = tmp.join("src");
+        fs::create_dir_all(&src).unwrap();
+        for (name, body) in files {
+            fs::write(src.join(name), body).unwrap();
+        }
+        tmp
+    }
+
+    // A duplicated function spanning 6 lines / >20 AST nodes, copied verbatim.
+    const CLONE_BODY: &str = "export function compute(a: number, b: number) {\n  const x = a + b;\n  const y = x * 2;\n  const z = y - 1;\n  const w = z / 3;\n  return w + x;\n}\n";
+
+    // T-621: clone group count reaching block_threshold fails the gate.
+    #[test]
+    fn clone_blocks_at_threshold() {
+        let tmp = clone_project(&[("a.ts", CLONE_BODY), ("b.ts", CLONE_BODY)]);
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_clone(
+            &project,
+            clone::DEFAULT_MIN_NODES,
+            clone::DEFAULT_MIN_LINES,
+            1,
+        );
+        assert!(
+            result.is_failure(),
+            "1 clone group at threshold 1 should fail"
+        );
+        assert!(
+            result.output().contains("structural clone group"),
+            "report should name clone groups: {}",
+            result.output()
+        );
+    }
+
+    // T-622: a clone count below block_threshold passes the gate.
+    #[test]
+    fn clone_passes_below_threshold() {
+        let tmp = clone_project(&[("a.ts", CLONE_BODY), ("b.ts", CLONE_BODY)]);
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_clone(
+            &project,
+            clone::DEFAULT_MIN_NODES,
+            clone::DEFAULT_MIN_LINES,
+            10,
+        );
+        assert!(
+            !result.is_failure(),
+            "clone count under threshold 10 should pass"
+        );
+        assert!(!result.is_skipped());
+    }
+
+    // T-623: declaration files (`*.d.ts`) are excluded from clone analysis, so a
+    // duplicate confined to them does not block. With only `.d.ts` inputs the
+    // gate has nothing to analyze and skips.
+    #[test]
+    fn clone_ignores_declaration_files() {
+        let tmp = clone_project(&[("a.d.ts", CLONE_BODY), ("b.d.ts", CLONE_BODY)]);
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_clone(
+            &project,
+            clone::DEFAULT_MIN_NODES,
+            clone::DEFAULT_MIN_LINES,
+            1,
+        );
+        assert!(
+            result.is_skipped(),
+            "only .d.ts inputs leave nothing to analyze"
+        );
     }
 }

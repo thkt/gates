@@ -2,7 +2,7 @@
 
 # gates
 
-Quality gates for Claude Code [PostToolUse hooks](https://docs.anthropic.com/en/docs/claude-code/hooks). Runs lint, type-check, test, knip, tsgo, dependency-cruiser, litmus, circular dependency detection, and coupling metrics in parallel after each Write/Edit/MultiEdit, providing failure feedback to guide the agent.
+Quality gates for Claude Code [PostToolUse hooks](https://docs.anthropic.com/en/docs/claude-code/hooks). Runs lint, type-check, test, knip, tsgo, dependency-cruiser, litmus, circular dependency detection, coupling metrics, and structural clone detection in parallel after each Write/Edit/MultiEdit, providing failure feedback to guide the agent.
 
 ## Features
 
@@ -48,6 +48,7 @@ Built into the `gates` binary. No separate installation required.
 | litmus   | `package.json` + `*.test.ts/tsx` exists              | Weak assertions, mock overuse, tautological tests                  |
 | circular | `package.json` + `src/` exists                       | Circular import dependencies (oxc-based AST)                       |
 | coupling | `package.json` + `src/` + `coupling.caThreshold` set | God modules (Ca > threshold) via Ca/Ce/instability (oxc-based AST) |
+| clone    | `package.json` + `src/` exists                       | Type 1/2 structural code clones via oxc AST hashing                |
 
 ### Script Gates
 
@@ -189,6 +190,23 @@ The coupling gate flags God modules whose afferent coupling (Ca, the number of i
 {
   "gates": { "coupling": true },
   "coupling": { "caThreshold": 20 }
+}
+```
+
+### Clone Thresholds
+
+The clone gate hashes the oxc AST of every `src/` file to find Type 1 (whitespace-normalized identical) and Type 2 (structurally identical, identifiers and literals differ) duplicate subtrees, then blocks once the number of clone groups reaches `clone.blockThreshold`. All three keys are optional and fall back to the defaults below.
+
+| Key                    | Default | Meaning                                                     |
+| ---------------------- | ------- | ----------------------------------------------------------- |
+| `clone.minNodes`       | 20      | Minimum AST node count for a subtree to count as a clone    |
+| `clone.minLines`       | 5       | Minimum line span of the largest copy for a group to report |
+| `clone.blockThreshold` | 3       | Number of clone groups that triggers a block                |
+
+```json
+{
+  "gates": { "clone": true },
+  "clone": { "minNodes": 20, "minLines": 5, "blockThreshold": 3 }
 }
 ```
 

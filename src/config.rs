@@ -16,6 +16,9 @@ pub enum ConfigSource {
 pub struct GatesConfig {
     pub gates: Option<HashMap<String, bool>>,
     pub coupling_ca_threshold: Option<usize>,
+    pub clone_min_nodes: Option<usize>,
+    pub clone_min_lines: Option<usize>,
+    pub clone_block_threshold: Option<usize>,
     pub source: ConfigSource,
 }
 
@@ -24,6 +27,9 @@ impl Default for GatesConfig {
         Self {
             gates: None,
             coupling_ca_threshold: None,
+            clone_min_nodes: None,
+            clone_min_lines: None,
+            clone_block_threshold: None,
             source: ConfigSource::Default,
         }
     }
@@ -33,12 +39,23 @@ impl Default for GatesConfig {
 struct ToolsJson {
     gates: Option<HashMap<String, serde_json::Value>>,
     coupling: Option<CouplingSection>,
+    clone: Option<CloneSection>,
 }
 
 #[derive(Deserialize)]
 struct CouplingSection {
     #[serde(rename = "caThreshold")]
     ca_threshold: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct CloneSection {
+    #[serde(rename = "minNodes")]
+    min_nodes: Option<usize>,
+    #[serde(rename = "minLines")]
+    min_lines: Option<usize>,
+    #[serde(rename = "blockThreshold")]
+    block_threshold: Option<usize>,
 }
 
 impl GatesConfig {
@@ -67,10 +84,17 @@ impl GatesConfig {
             }
         };
         let coupling_ca_threshold = parsed.coupling.and_then(|c| c.ca_threshold);
+        let (clone_min_nodes, clone_min_lines, clone_block_threshold) =
+            parsed.clone.map_or((None, None, None), |c| {
+                (c.min_nodes, c.min_lines, c.block_threshold)
+            });
         let Some(gates_map) = parsed.gates else {
             return Self {
                 gates: None,
                 coupling_ca_threshold,
+                clone_min_nodes,
+                clone_min_lines,
+                clone_block_threshold,
                 source: ConfigSource::Explicit,
             };
         };
@@ -91,6 +115,9 @@ impl GatesConfig {
         Self {
             gates: Some(gates),
             coupling_ca_threshold,
+            clone_min_nodes,
+            clone_min_lines,
+            clone_block_threshold,
             source: ConfigSource::Explicit,
         }
     }
@@ -208,5 +235,37 @@ mod tests {
         assert!(config.is_enabled("knip"));
         assert!(!config.is_enabled("bad"));
         assert!(!config.is_enabled("num"));
+    }
+
+    // T-511: clone.minNodes/minLines/blockThreshold are read into config.
+    #[test]
+    fn reads_clone_section() {
+        let dir = setup_dir(Some(
+            r#"{"clone":{"minNodes":30,"minLines":8,"blockThreshold":5}}"#,
+        ));
+        let config = GatesConfig::load(&dir);
+        assert_eq!(config.clone_min_nodes, Some(30));
+        assert_eq!(config.clone_min_lines, Some(8));
+        assert_eq!(config.clone_block_threshold, Some(5));
+    }
+
+    // T-512: absent clone section yields no overrides.
+    #[test]
+    fn missing_clone_section_yields_none() {
+        let dir = setup_dir(Some(r#"{"gates":{"knip":true}}"#));
+        let config = GatesConfig::load(&dir);
+        assert_eq!(config.clone_min_nodes, None);
+        assert_eq!(config.clone_min_lines, None);
+        assert_eq!(config.clone_block_threshold, None);
+    }
+
+    // T-513: a partial clone section leaves unspecified fields None.
+    #[test]
+    fn partial_clone_section() {
+        let dir = setup_dir(Some(r#"{"clone":{"minNodes":40}}"#));
+        let config = GatesConfig::load(&dir);
+        assert_eq!(config.clone_min_nodes, Some(40));
+        assert_eq!(config.clone_min_lines, None);
+        assert_eq!(config.clone_block_threshold, None);
     }
 }

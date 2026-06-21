@@ -73,6 +73,15 @@ pub fn display_path(path: &Path, base: &Path) -> String {
         .to_string()
 }
 
+/// Collect all `.ts`/`.tsx` files under `dir` (canonicalized, excluding
+/// `node_modules`/`.git`/`dist`/`build`/`target`). Shared with the `clone` gate,
+/// which re-parses files independently of the dependency graph.
+pub fn collect_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_source_files(dir, &mut files);
+    files
+}
+
 fn collect_source_files(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
