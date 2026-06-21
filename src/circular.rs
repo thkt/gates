@@ -1,136 +1,27 @@
-use oxc_allocator::Allocator;
-use oxc_ast::ast::Statement;
-use oxc_parser::Parser;
-use oxc_span::SourceType;
+use crate::depgraph::{DependencyGraph, display_path};
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
-
-const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "target"];
 
 pub struct CircularResult {
     pub cycles: Vec<Vec<String>>,
 }
 
-pub fn detect(src_dir: &Path) -> CircularResult {
-    let mut files = Vec::new();
-    collect_source_files(src_dir, &mut files);
-
-    let graph = build_graph(&files);
-    let raw_cycles = find_cycles(&graph);
+/// Detect cycles from a prebuilt graph, letting callers share a single parse
+/// with the coupling gate.
+pub fn detect_in(graph: &DependencyGraph, src_dir: &Path) -> CircularResult {
+    let raw_cycles = find_cycles(&graph.edges);
 
     let cycles = raw_cycles
         .into_iter()
         .map(|cycle| {
             cycle
                 .into_iter()
-                .map(|p| path_display(&p, src_dir))
+                .map(|p| display_path(&p, src_dir))
                 .collect()
         })
         .collect();
 
     CircularResult { cycles }
-}
-
-fn path_display(path: &Path, base: &Path) -> String {
-    path.strip_prefix(base)
-        .unwrap_or(path)
-        .display()
-        .to_string()
-}
-
-fn collect_source_files(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !EXCLUDED_DIRS.contains(&name) {
-                collect_source_files(&path, files);
-            }
-        } else if matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("ts" | "tsx")
-        ) && let Ok(canonical) = path.canonicalize()
-        {
-            files.push(canonical);
-        }
-    }
-}
-
-fn build_graph(files: &[PathBuf]) -> HashMap<PathBuf, Vec<PathBuf>> {
-    let file_set: HashSet<&PathBuf> = files.iter().collect();
-    let mut graph = HashMap::new();
-
-    for file in files {
-        let Ok(source) = fs::read_to_string(file) else {
-            continue;
-        };
-        let specifiers = extract_import_specifiers(&source, file);
-        let resolved: Vec<PathBuf> = specifiers
-            .iter()
-            .filter_map(|s| resolve_import(file, s))
-            .filter(|p| file_set.contains(p))
-            .collect();
-        graph.insert(file.clone(), resolved);
-    }
-
-    graph
-}
-
-fn extract_import_specifiers(source: &str, file: &Path) -> Vec<String> {
-    let allocator = Allocator::default();
-    let source_type = SourceType::from_path(file).unwrap_or_default();
-    let ret = Parser::new(&allocator, source, source_type).parse();
-
-    let mut specifiers = Vec::new();
-    for stmt in &ret.program.body {
-        match stmt {
-            Statement::ImportDeclaration(decl) => {
-                specifiers.push(decl.source.value.to_string());
-            }
-            Statement::ExportNamedDeclaration(decl) => {
-                if let Some(source) = &decl.source {
-                    specifiers.push(source.value.to_string());
-                }
-            }
-            Statement::ExportAllDeclaration(decl) => {
-                specifiers.push(decl.source.value.to_string());
-            }
-            _ => {}
-        }
-    }
-    specifiers
-}
-
-fn resolve_import(from_file: &Path, specifier: &str) -> Option<PathBuf> {
-    if !specifier.starts_with('.') {
-        return None;
-    }
-    let dir = from_file.parent()?;
-    let base = dir.join(specifier);
-
-    if base.is_file() {
-        return base.canonicalize().ok();
-    }
-
-    for ext in ["ts", "tsx"] {
-        let candidate = base.with_extension(ext);
-        if candidate.is_file() {
-            return candidate.canonicalize().ok();
-        }
-    }
-
-    for ext in ["ts", "tsx"] {
-        let candidate = base.join(format!("index.{ext}"));
-        if candidate.is_file() {
-            return candidate.canonicalize().ok();
-        }
-    }
-
-    None
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -210,6 +101,7 @@ fn dfs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::depgraph;
     use crate::test_utils::TempDir;
     use std::fs;
 
@@ -225,7 +117,7 @@ mod tests {
         .unwrap();
         fs::write(src.join("b.ts"), "export const b = 42;\n").unwrap();
 
-        let result = detect(&src);
+        let result = detect_in(&depgraph::build(&src), &src);
         assert!(result.cycles.is_empty());
     }
 
@@ -245,7 +137,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = detect(&src);
+        let result = detect_in(&depgraph::build(&src), &src);
         assert_eq!(result.cycles.len(), 1);
         assert_eq!(result.cycles[0].len(), 2);
     }
@@ -271,7 +163,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = detect(&src);
+        let result = detect_in(&depgraph::build(&src), &src);
         assert_eq!(result.cycles.len(), 1);
         assert_eq!(result.cycles[0].len(), 3);
     }
@@ -287,7 +179,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = detect(&src);
+        let result = detect_in(&depgraph::build(&src), &src);
         assert!(result.cycles.is_empty());
     }
 
@@ -307,7 +199,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = detect(&src);
+        let result = detect_in(&depgraph::build(&src), &src);
         assert_eq!(result.cycles.len(), 1);
     }
 
@@ -328,7 +220,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = detect(&src);
+        let result = detect_in(&depgraph::build(&src), &src);
         assert_eq!(result.cycles.len(), 1);
     }
 
@@ -338,7 +230,7 @@ mod tests {
         let src = tmp.join("src");
         fs::create_dir_all(&src).unwrap();
 
-        let result = detect(&src);
+        let result = detect_in(&depgraph::build(&src), &src);
         assert!(result.cycles.is_empty());
     }
 
@@ -351,7 +243,7 @@ mod tests {
         fs::write(src.join("a.ts"), "export const a = 1;\n").unwrap();
         fs::write(nm.join("index.ts"), "import { a } from '../../a';\n").unwrap();
 
-        let result = detect(&src);
+        let result = detect_in(&depgraph::build(&src), &src);
         assert!(result.cycles.is_empty());
     }
 }

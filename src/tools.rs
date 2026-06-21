@@ -1,4 +1,6 @@
 use crate::circular;
+use crate::coupling;
+use crate::depgraph;
 use crate::project::ProjectInfo;
 use crate::resolve;
 use crate::sanitize;
@@ -45,6 +47,20 @@ impl ToolResult {
             name,
             hint: "",
             outcome: GateOutcome::Passed,
+        }
+    }
+
+    /// Build a Failed result whose output is truncated to `MAX_OUTPUT_LINES`,
+    /// the shared truncation policy for embedded gates.
+    ///
+    /// `run_command_with_label` does not use this: external command output also
+    /// needs `sanitize` + `trim` and may resolve to `Passed`, so it assembles
+    /// its outcome inline.
+    pub fn failed(name: &'static str, hint: &'static str, text: &str) -> Self {
+        Self {
+            name,
+            hint,
+            outcome: GateOutcome::Failed(sanitize::tail_lines(text, MAX_OUTPUT_LINES)),
         }
     }
 
@@ -475,23 +491,46 @@ pub fn run_litmus(project: &ProjectInfo) -> ToolResult {
     }
 
     let output: Vec<String> = result.issues.iter().map(ToString::to_string).collect();
-    let truncated = sanitize::tail_lines(&output.join("\n"), MAX_OUTPUT_LINES);
 
-    ToolResult {
-        name: "litmus",
-        hint: "Fix test quality issues (weak assertions, mock overuse, tautological tests).",
-        outcome: GateOutcome::Failed(truncated),
-    }
+    ToolResult::failed(
+        "litmus",
+        "Fix test quality issues (weak assertions, mock overuse, tautological tests).",
+        &output.join("\n"),
+    )
 }
 
-pub fn run_circular(project: &ProjectInfo) -> ToolResult {
+/// Build the dependency graph once and run the circular and coupling gates that
+/// read from it, so the project is parsed a single time per hook invocation.
+pub fn run_graph_gates(
+    project: &ProjectInfo,
+    circular_enabled: bool,
+    coupling_enabled: bool,
+    ca_threshold: Option<usize>,
+) -> Vec<ToolResult> {
     let src_dir = project.root.join("src");
     if !project.has_package_json || !src_dir.is_dir() {
-        return ToolResult::skipped("circular");
+        let mut out = Vec::new();
+        if circular_enabled {
+            out.push(ToolResult::skipped("circular"));
+        }
+        if coupling_enabled {
+            out.push(ToolResult::skipped("coupling"));
+        }
+        return out;
     }
 
-    let result = circular::detect(&src_dir);
+    let graph = depgraph::build(&src_dir);
+    let mut out = Vec::new();
+    if circular_enabled {
+        out.push(circular_result(&circular::detect_in(&graph, &src_dir)));
+    }
+    if coupling_enabled {
+        out.push(coupling_result(&graph, &src_dir, ca_threshold));
+    }
+    out
+}
 
+fn circular_result(result: &circular::CircularResult) -> ToolResult {
     if result.cycles.is_empty() {
         return ToolResult::passed("circular");
     }
@@ -515,13 +554,40 @@ pub fn run_circular(project: &ProjectInfo) -> ToolResult {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let truncated = sanitize::tail_lines(&format!("{header}{body}"), MAX_OUTPUT_LINES);
+    ToolResult::failed(
+        "circular",
+        "Break circular import dependencies.",
+        &format!("{header}{body}"),
+    )
+}
 
-    ToolResult {
-        name: "circular",
-        hint: "Break circular import dependencies.",
-        outcome: GateOutcome::Failed(truncated),
+fn coupling_result(
+    graph: &depgraph::DependencyGraph,
+    src_dir: &Path,
+    ca_threshold: Option<usize>,
+) -> ToolResult {
+    let Some(threshold) = ca_threshold else {
+        return ToolResult::skipped("coupling");
+    };
+
+    let result = coupling::analyze(graph, src_dir, threshold);
+    if result.god_modules.is_empty() {
+        return ToolResult::passed("coupling");
     }
+
+    let n = result.god_modules.len();
+    let header = format!("Found {n} god module(s) (Ca > {threshold}):\n");
+    let body: String = result
+        .god_modules
+        .iter()
+        .map(|m| format!("{}  Ca={} Ce={} I={:.2}", m.path, m.ca, m.ce, m.instability))
+        .collect::<Vec<_>>()
+        .join("\n");
+    ToolResult::failed(
+        "coupling",
+        "Reduce afferent coupling (Ca) on the listed modules; split responsibilities or introduce an abstraction layer.",
+        &format!("{header}{body}"),
+    )
 }
 
 pub fn run_gate(gate: &GateDefinition, project: &ProjectInfo) -> ToolResult {
@@ -807,6 +873,13 @@ mod tests {
         assert_eq!(gate.args, &["src/"]);
     }
 
+    fn run_circular(project: &ProjectInfo) -> ToolResult {
+        run_graph_gates(project, true, false, None)
+            .into_iter()
+            .next()
+            .expect("circular gate enabled yields one result")
+    }
+
     #[test]
     fn circular_skips_without_package_json() {
         let project = test_project(false, false);
@@ -877,6 +950,102 @@ mod tests {
             "should show count: {output}"
         );
         assert!(output.contains(" → "), "should show arrow chain: {output}");
+    }
+
+    fn run_coupling(project: &ProjectInfo, ca_threshold: Option<usize>) -> ToolResult {
+        run_graph_gates(project, false, true, ca_threshold)
+            .into_iter()
+            .next()
+            .expect("coupling gate enabled yields one result")
+    }
+
+    fn coupling_project(files: &[(&str, &str)]) -> TempDir {
+        let tmp = TempDir::new("coupling-gate");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        let src = tmp.join("src");
+        fs::create_dir_all(&src).unwrap();
+        for (name, body) in files {
+            fs::write(src.join(name), body).unwrap();
+        }
+        tmp
+    }
+
+    // T-401: coupling skips when package.json is absent (fail-open).
+    #[test]
+    fn coupling_skips_without_package_json() {
+        let project = test_project(false, false);
+        let result = run_coupling(&project, Some(2));
+        assert!(result.is_skipped());
+    }
+
+    // T-402: coupling skips when src/ is absent (fail-open).
+    #[test]
+    fn coupling_skips_without_src_dir() {
+        let tmp = TempDir::new("coupling-nosrc");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_coupling(&project, Some(2));
+        assert!(result.is_skipped());
+    }
+
+    // T-403: coupling skips when caThreshold is unset.
+    #[test]
+    fn coupling_skips_without_threshold() {
+        let tmp = coupling_project(&[("a.ts", "export const a = 1;\n")]);
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_coupling(&project, None);
+        assert!(result.is_skipped());
+    }
+
+    // T-404: a configured threshold with no God module passes.
+    #[test]
+    fn coupling_passes_under_threshold() {
+        let tmp = coupling_project(&[
+            ("a.ts", "export const a = 1;\n"),
+            ("b.ts", "import { a } from './a';\nexport const b = a;\n"),
+        ]);
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_coupling(&project, Some(2));
+        assert!(!result.is_failure(), "Ca=1 under threshold 2 should pass");
+        assert!(!result.is_skipped());
+    }
+
+    // T-405: a God module above threshold fails with path/Ca/Ce/I in the output.
+    #[test]
+    fn coupling_detects_god_module() {
+        let tmp = coupling_project(&[
+            ("a.ts", "export const a = 1;\n"),
+            ("b.ts", "import { a } from './a';\nexport const b = a;\n"),
+            ("c.ts", "import { a } from './a';\nexport const c = a;\n"),
+            ("d.ts", "import { a } from './a';\nexport const d = a;\n"),
+        ]);
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_coupling(&project, Some(2));
+        assert!(result.is_failure(), "Ca=3 over threshold 2 should fail");
+        let output = result.output();
+        assert!(output.contains("god module"), "should label: {output}");
+        assert!(output.contains("a.ts"), "should list path: {output}");
+        assert!(output.contains("Ca=3"), "should show Ca: {output}");
+        assert!(
+            output.contains("Ce=") && output.contains("I="),
+            "should show Ce and I: {output}"
+        );
     }
 
     #[test]
