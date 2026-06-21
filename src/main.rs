@@ -1,4 +1,5 @@
 mod circular;
+mod clone;
 mod color;
 mod config;
 mod coupling;
@@ -113,12 +114,14 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
     let litmus_enabled = config.is_enabled("litmus");
     let circular_enabled = config.is_enabled("circular");
     let coupling_enabled = config.is_enabled("coupling");
+    let clone_enabled = config.is_enabled("clone");
 
     let total_enabled = enabled.len()
         + script_gates.len()
         + usize::from(litmus_enabled)
         + usize::from(circular_enabled)
-        + usize::from(coupling_enabled);
+        + usize::from(coupling_enabled)
+        + usize::from(clone_enabled);
     if total_enabled == 0 {
         return None;
     }
@@ -147,6 +150,20 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
         let p = project.clone();
         Some(thread::spawn(move || {
             tools::run_graph_gates(&p, circular_enabled, coupling_enabled, ca_threshold)
+        }))
+    } else {
+        None
+    };
+
+    let clone_handle = if clone_enabled {
+        let p = project.clone();
+        let min_nodes = config.clone_min_nodes.unwrap_or(clone::DEFAULT_MIN_NODES);
+        let min_lines = config.clone_min_lines.unwrap_or(clone::DEFAULT_MIN_LINES);
+        let block_threshold = config
+            .clone_block_threshold
+            .unwrap_or(clone::DEFAULT_BLOCK_THRESHOLD);
+        Some(thread::spawn(move || {
+            tools::run_clone(&p, min_nodes, min_lines, block_threshold)
         }))
     } else {
         None
@@ -194,6 +211,16 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
                 if coupling_enabled {
                     results.push(tools::ToolResult::skipped("coupling"));
                 }
+            }
+        }
+    }
+
+    if let Some(h) = clone_handle {
+        match h.join() {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                eprintln!("gates: clone thread panicked: {e:?}");
+                results.push(tools::ToolResult::skipped("clone"));
             }
         }
     }

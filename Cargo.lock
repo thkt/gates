@@ -28,6 +28,9 @@ name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "castaway"
@@ -55,6 +58,7 @@ dependencies = [
  "itoa",
  "rustversion",
  "ryu",
+ "serde",
  "static_assertions",
 ]
 
@@ -204,7 +208,9 @@ dependencies = [
  "allocator-api2",
  "hashbrown",
  "oxc_data_structures",
+ "oxc_estree",
  "rustc-hash",
+ "serde",
 ]
 
 [[package]]
@@ -275,6 +281,11 @@ name = "oxc_estree"
 version = "0.137.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b6c062d52b9ff15d118b87679bdd0a05c43599c1d55fd1cab280da1cc822858"
+dependencies = [
+ "dragonbox_ecma",
+ "itoa",
+ "oxc_data_structures",
+]
 
 [[package]]
 name = "oxc_index"
@@ -339,6 +350,7 @@ dependencies = [
  "oxc_ast_macros",
  "oxc_estree",
  "oxc_str",
+ "serde",
 ]
 
 [[package]]
@@ -351,6 +363,7 @@ dependencies = [
  "hashbrown",
  "oxc_allocator",
  "oxc_estree",
+ "serde",
 ]
 
 [[package]]
@@ -370,6 +383,7 @@ dependencies = [
  "oxc_span",
  "oxc_str",
  "phf",
+ "serde",
  "unicode-id-start",
 ]
 
