@@ -241,7 +241,15 @@ fn render(value: &Value, ctx: &mut WalkCtx) -> Rendered {
     match value {
         Value::Object(map) => match map.get("type") {
             Some(Value::String(ty)) => render_node(map, ty, ctx),
-            _ => render_plain_object(map, ctx),
+            // Non-node objects (the regex `{pattern,flags}` payload, template
+            // `{cooked,raw}`) are stringified by render_node via CONTENT_KEYS
+            // before reaching render(), so this arm is not hit in practice; an
+            // empty render keeps the match total and degrades gracefully.
+            _ => Rendered {
+                named: String::new(),
+                blank: String::new(),
+                count: 0,
+            },
         },
         Value::Array(arr) => {
             let mut named = String::from("[");
@@ -322,38 +330,6 @@ fn render_node(map: &Map<String, Value>, ty: &str, ctx: &mut WalkCtx) -> Rendere
             end_line,
         });
     }
-    Rendered {
-        named,
-        blank,
-        count,
-    }
-}
-
-/// A `type`-less object (e.g. a regex `{pattern,flags}` payload). Rendered
-/// structurally but never recorded as a clone candidate.
-fn render_plain_object(map: &Map<String, Value>, ctx: &mut WalkCtx) -> Rendered {
-    let mut keys: Vec<&String> = map
-        .keys()
-        .filter(|k| !matches!(k.as_str(), "start" | "end" | "range"))
-        .collect();
-    keys.sort();
-    let mut named = String::from("{");
-    let mut blank = String::from("{");
-    let mut count = 0;
-    for k in keys {
-        let r = render(&map[k], ctx);
-        named.push_str(k);
-        named.push(':');
-        named.push_str(&r.named);
-        named.push(',');
-        blank.push_str(k);
-        blank.push(':');
-        blank.push_str(&r.blank);
-        blank.push(',');
-        count += r.count;
-    }
-    named.push('}');
-    blank.push('}');
     Rendered {
         named,
         blank,
@@ -540,5 +516,27 @@ mod tests {
             "the clone survives because one copy spans >= min_lines"
         );
         assert_eq!(result.groups[0].instances.len(), 2);
+    }
+
+    // T-613: a regex literal carries a type-less `{pattern,flags}` payload.
+    // render_node stringifies it via CONTENT_KEYS, so regex-containing functions
+    // still group as a clone rather than being walked structurally.
+    #[test]
+    fn renders_regex_payload_in_clone_path() {
+        let src = "export function validate(input: string) {\n  const re = /ab+c/gi;\n  const ok = re.test(input);\n  const trimmed = input.trim();\n  return ok && trimmed.length > 0;\n}\n";
+        let result = analyze_files(&[("a.ts", src), ("b.ts", src)], 5, 5);
+        assert_eq!(
+            result.groups.len(),
+            1,
+            "identical regex-containing functions form one clone group"
+        );
+    }
+
+    // T-614: an unreadable input path is skipped, not fatal.
+    #[test]
+    fn skips_unreadable_files() {
+        let missing = PathBuf::from("/nonexistent/does-not-exist.ts");
+        let result = analyze(&[missing], Path::new("/nonexistent"), 5, 5);
+        assert_eq!(result.groups.len(), 0);
     }
 }
