@@ -50,6 +50,20 @@ impl ToolResult {
         }
     }
 
+    /// Build a Failed result whose output is truncated to `MAX_OUTPUT_LINES`,
+    /// the shared truncation policy for embedded gates.
+    ///
+    /// `run_command_with_label` does not use this: external command output also
+    /// needs `sanitize` + `trim` and may resolve to `Passed`, so it assembles
+    /// its outcome inline.
+    pub fn failed(name: &'static str, hint: &'static str, text: &str) -> Self {
+        Self {
+            name,
+            hint,
+            outcome: GateOutcome::Failed(sanitize::tail_lines(text, MAX_OUTPUT_LINES)),
+        }
+    }
+
     pub fn is_failure(&self) -> bool {
         matches!(self.outcome, GateOutcome::Failed(_))
     }
@@ -477,13 +491,12 @@ pub fn run_litmus(project: &ProjectInfo) -> ToolResult {
     }
 
     let output: Vec<String> = result.issues.iter().map(ToString::to_string).collect();
-    let truncated = sanitize::tail_lines(&output.join("\n"), MAX_OUTPUT_LINES);
 
-    ToolResult {
-        name: "litmus",
-        hint: "Fix test quality issues (weak assertions, mock overuse, tautological tests).",
-        outcome: GateOutcome::Failed(truncated),
-    }
+    ToolResult::failed(
+        "litmus",
+        "Fix test quality issues (weak assertions, mock overuse, tautological tests).",
+        &output.join("\n"),
+    )
 }
 
 /// Build the dependency graph once and run the circular and coupling gates that
@@ -541,13 +554,11 @@ fn circular_result(result: &circular::CircularResult) -> ToolResult {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let truncated = sanitize::tail_lines(&format!("{header}{body}"), MAX_OUTPUT_LINES);
-
-    ToolResult {
-        name: "circular",
-        hint: "Break circular import dependencies.",
-        outcome: GateOutcome::Failed(truncated),
-    }
+    ToolResult::failed(
+        "circular",
+        "Break circular import dependencies.",
+        &format!("{header}{body}"),
+    )
 }
 
 fn coupling_result(
@@ -572,13 +583,11 @@ fn coupling_result(
         .map(|m| format!("{}  Ca={} Ce={} I={:.2}", m.path, m.ca, m.ce, m.instability))
         .collect::<Vec<_>>()
         .join("\n");
-    let truncated = sanitize::tail_lines(&format!("{header}{body}"), MAX_OUTPUT_LINES);
-
-    ToolResult {
-        name: "coupling",
-        hint: "Reduce afferent coupling (Ca) on the listed modules; split responsibilities or introduce an abstraction layer.",
-        outcome: GateOutcome::Failed(truncated),
-    }
+    ToolResult::failed(
+        "coupling",
+        "Reduce afferent coupling (Ca) on the listed modules; split responsibilities or introduce an abstraction layer.",
+        &format!("{header}{body}"),
+    )
 }
 
 pub fn run_gate(gate: &GateDefinition, project: &ProjectInfo) -> ToolResult {
