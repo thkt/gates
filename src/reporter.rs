@@ -13,16 +13,17 @@ pub fn format_summary(results: &[ToolResult]) -> String {
     }
 
     let failures: Vec<_> = ran.iter().filter(|r| r.is_failure()).collect();
+    let warnings: Vec<_> = ran.iter().filter(|r| r.is_warning()).collect();
 
     if failures.is_empty() {
-        return format!(
-            "\n{}",
-            color::bold_green(&format!(
-                "Gates \u{2713} {}/{} passed",
-                ran.len(),
-                ran.len()
-            ))
-        );
+        // Warnings are advisory, so they count as ran but not as passed.
+        let passed = ran.len() - warnings.len();
+        let mut lines = vec![
+            String::new(),
+            color::bold_green(&format!("Gates \u{2713} {}/{} passed", passed, ran.len())),
+        ];
+        append_advisories(&mut lines, &warnings);
+        return lines.join("\n");
     }
 
     let mut lines = vec![
@@ -32,21 +33,7 @@ pub fn format_summary(results: &[ToolResult]) -> String {
 
     for f in &failures {
         lines.push(color::red(&format!("  \u{2717} {}", f.name)));
-        let output = f.output();
-        if output.is_empty() {
-            continue;
-        }
-        let non_blank: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
-        let total = non_blank.len();
-        for line in &non_blank[..total.min(MAX_PREVIEW_LINES)] {
-            lines.push(color::red(&format!("    {line}")));
-        }
-        if total > MAX_PREVIEW_LINES {
-            lines.push(color::dim(&format!(
-                "    ... +{} more lines",
-                total - MAX_PREVIEW_LINES
-            )));
-        }
+        push_preview(&mut lines, f.output(), color::red);
     }
 
     lines.push(color::bold_red(FOOTER_SEPARATOR));
@@ -56,7 +43,45 @@ pub fn format_summary(results: &[ToolResult]) -> String {
         if failures.len() == 1 { "" } else { "s" }
     )));
 
+    append_advisories(&mut lines, &warnings);
+
     lines.join("\n")
+}
+
+/// Append a yellow advisory block for warn-level gates. These report duplication
+/// or similar findings without blocking, so they render below any failures.
+fn append_advisories(lines: &mut Vec<String>, warnings: &[&&ToolResult]) {
+    if warnings.is_empty() {
+        return;
+    }
+    lines.push(color::bold_yellow(&format!(
+        "  {} advisory warning{}:",
+        warnings.len(),
+        if warnings.len() == 1 { "" } else { "s" }
+    )));
+    for w in warnings {
+        lines.push(color::yellow(&format!("  \u{26a0} {}", w.name)));
+        push_preview(lines, w.output(), color::yellow);
+    }
+}
+
+/// Push up to `MAX_PREVIEW_LINES` non-blank output lines, colorized, with a dim
+/// truncation note. Shared by failure and advisory rendering.
+fn push_preview(lines: &mut Vec<String>, output: &str, colorize: fn(&str) -> String) {
+    if output.is_empty() {
+        return;
+    }
+    let non_blank: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+    let total = non_blank.len();
+    for line in &non_blank[..total.min(MAX_PREVIEW_LINES)] {
+        lines.push(colorize(&format!("    {line}")));
+    }
+    if total > MAX_PREVIEW_LINES {
+        lines.push(color::dim(&format!(
+            "    ... +{} more lines",
+            total - MAX_PREVIEW_LINES
+        )));
+    }
 }
 
 #[cfg(test)]
@@ -91,6 +116,14 @@ mod tests {
 
     fn skipped(name: &'static str) -> ToolResult {
         ToolResult::skipped(name)
+    }
+
+    fn warned_with(name: &'static str, output: &str) -> ToolResult {
+        ToolResult {
+            name,
+            hint: "",
+            outcome: GateOutcome::Warned(output.into()),
+        }
     }
 
     #[test]
@@ -189,6 +222,55 @@ mod tests {
         assert!(output.contains("line3"));
         assert!(!output.contains("line4"), "line4 should be truncated");
         assert!(output.contains("+1 more lines"));
+    }
+
+    // T-611: a lone warning shows an advisory line, not a BLOCKED section.
+    #[test]
+    fn warning_only_is_advisory_not_blocked() {
+        let results = vec![warned_with("jscpd", "Found duplication: 12%")];
+        let output = strip_ansi(&format_summary(&results));
+        assert!(!output.contains("BLOCKED"), "warn must not block: {output}");
+        assert!(
+            output.contains("\u{26a0} jscpd"),
+            "missing advisory: {output}"
+        );
+        assert!(output.contains("Found duplication: 12%"), "missing preview");
+    }
+
+    // T-612: a warning counts as ran but not as passed.
+    #[test]
+    fn warning_excluded_from_pass_count() {
+        let results = vec![passed("lint"), warned_with("jscpd", "dup")];
+        let output = strip_ansi(&format_summary(&results));
+        assert!(
+            output.contains("1/2 passed"),
+            "warn excluded from passed: {output}"
+        );
+        assert!(
+            output.contains("advisory"),
+            "missing advisory label: {output}"
+        );
+    }
+
+    // T-613: a failure and a warning together show both BLOCKED and the advisory.
+    #[test]
+    fn failure_and_warning_show_both() {
+        let results = vec![failed("test"), warned_with("jscpd", "dup")];
+        let output = strip_ansi(&format_summary(&results));
+        assert!(output.contains("BLOCKED"), "failure must block: {output}");
+        assert!(
+            output.contains("\u{26a0} jscpd"),
+            "missing advisory: {output}"
+        );
+    }
+
+    // T-614: with no warnings the pass line is unchanged (no advisory text).
+    #[test]
+    fn no_advisory_when_no_warnings() {
+        let results = vec![passed("lint"), passed("test")];
+        let output = strip_ansi(&format_summary(&results));
+        assert!(output.contains("2/2 passed"));
+        assert!(!output.contains("advisory"), "no advisory without warnings");
     }
 
     #[test]

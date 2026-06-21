@@ -115,13 +115,15 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
     let circular_enabled = config.is_enabled("circular");
     let coupling_enabled = config.is_enabled("coupling");
     let clone_enabled = config.is_enabled("clone");
+    let jscpd_enabled = config.is_enabled("jscpd");
 
     let total_enabled = enabled.len()
         + script_gates.len()
         + usize::from(litmus_enabled)
         + usize::from(circular_enabled)
         + usize::from(coupling_enabled)
-        + usize::from(clone_enabled);
+        + usize::from(clone_enabled)
+        + usize::from(jscpd_enabled);
     if total_enabled == 0 {
         return None;
     }
@@ -164,6 +166,31 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
             .unwrap_or(clone::DEFAULT_BLOCK_THRESHOLD);
         Some(thread::spawn(move || {
             tools::run_clone(&p, min_nodes, min_lines, block_threshold)
+        }))
+    } else {
+        None
+    };
+
+    let jscpd_handle = if jscpd_enabled {
+        let p = project.clone();
+        let min_lines = config
+            .jscpd_min_lines
+            .unwrap_or(tools::DEFAULT_JSCPD_MIN_LINES);
+        let min_tokens = config
+            .jscpd_min_tokens
+            .unwrap_or(tools::DEFAULT_JSCPD_MIN_TOKENS);
+        let threshold = config
+            .jscpd_threshold
+            .unwrap_or(tools::DEFAULT_JSCPD_THRESHOLD);
+        let block = config.jscpd_block.unwrap_or(false);
+        let ignore = config.jscpd_ignore.clone().unwrap_or_else(|| {
+            tools::DEFAULT_JSCPD_IGNORE
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect()
+        });
+        Some(thread::spawn(move || {
+            tools::run_jscpd(&p, min_lines, min_tokens, threshold, block, &ignore)
         }))
     } else {
         None
@@ -221,6 +248,16 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
             Err(e) => {
                 eprintln!("gates: clone thread panicked: {e:?}");
                 results.push(tools::ToolResult::skipped("clone"));
+            }
+        }
+    }
+
+    if let Some(h) = jscpd_handle {
+        match h.join() {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                eprintln!("gates: jscpd thread panicked: {e:?}");
+                results.push(tools::ToolResult::skipped("jscpd"));
             }
         }
     }

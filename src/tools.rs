@@ -5,6 +5,7 @@ use crate::depgraph;
 use crate::project::ProjectInfo;
 use crate::resolve;
 use crate::sanitize;
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -12,6 +13,7 @@ use std::io;
 use std::iter;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -25,6 +27,9 @@ pub enum GateOutcome {
     Passed,
     Failed(String),
     Skipped,
+    /// Advisory failure: reported to the human via stderr but not promoted to a
+    /// block decision, so the AI is not forced to act. Used by warn-level gates.
+    Warned(String),
 }
 
 #[derive(Debug)]
@@ -65,8 +70,22 @@ impl ToolResult {
         }
     }
 
+    /// Build a Warned result: the advisory counterpart of `failed`, sharing the
+    /// same truncation policy. Reported to the human but never blocks the AI.
+    pub fn warned(name: &'static str, hint: &'static str, text: &str) -> Self {
+        Self {
+            name,
+            hint,
+            outcome: GateOutcome::Warned(sanitize::tail_lines(text, MAX_OUTPUT_LINES)),
+        }
+    }
+
     pub fn is_failure(&self) -> bool {
         matches!(self.outcome, GateOutcome::Failed(_))
+    }
+
+    pub fn is_warning(&self) -> bool {
+        matches!(self.outcome, GateOutcome::Warned(_))
     }
 
     pub fn is_skipped(&self) -> bool {
@@ -75,7 +94,7 @@ impl ToolResult {
 
     pub fn output(&self) -> &str {
         match &self.outcome {
-            GateOutcome::Failed(s) => s,
+            GateOutcome::Failed(s) | GateOutcome::Warned(s) => s,
             GateOutcome::Passed | GateOutcome::Skipped => "",
         }
     }
@@ -662,6 +681,167 @@ fn clone_report(groups: &[clone::CloneGroup]) -> String {
     lines.join("\n")
 }
 
+pub const DEFAULT_JSCPD_MIN_LINES: usize = 5;
+pub const DEFAULT_JSCPD_MIN_TOKENS: usize = 50;
+pub const DEFAULT_JSCPD_THRESHOLD: f64 = 10.0;
+
+/// Default ignore globs: dependencies, plus test/spec files and generated/build
+/// output, which the gate's "extract shared code" remedy does not apply to.
+/// `node_modules` is normally excluded by jscpd's gitignore handling, but is
+/// listed here so a repo that does not gitignore it still skips the scan (which
+/// would otherwise blow the gate's timeout). jscpd's own docs use this glob.
+pub const DEFAULT_JSCPD_IGNORE: &[&str] = &[
+    "**/node_modules/**",
+    "**/*.test.*",
+    "**/*.spec.*",
+    "**/generated/**",
+    "**/dist/**",
+];
+
+const JSCPD_HINT: &str = "Extract the duplicated code into a shared function or module (DRY).";
+
+/// Subset of jscpd's JSON report the gate reads. `duplicates` and its inner
+/// fields default so a shape change in the (prose-documented) duplicate entries
+/// degrades the file-pair listing rather than failing the parse and silently
+/// skipping the gate; the load-bearing `percentage` stays required.
+#[derive(Deserialize)]
+pub struct JscpdReport {
+    statistics: JscpdStatistics,
+    #[serde(default)]
+    duplicates: Vec<JscpdDuplicate>,
+}
+
+#[derive(Deserialize)]
+struct JscpdStatistics {
+    total: JscpdTotal,
+}
+
+#[derive(Deserialize)]
+struct JscpdTotal {
+    percentage: f64,
+}
+
+#[derive(Deserialize)]
+struct JscpdDuplicate {
+    #[serde(default)]
+    lines: usize,
+    #[serde(rename = "firstFile", default)]
+    first_file: JscpdFile,
+    #[serde(rename = "secondFile", default)]
+    second_file: JscpdFile,
+}
+
+#[derive(Deserialize, Default)]
+struct JscpdFile {
+    #[serde(default)]
+    name: String,
+}
+
+fn parse_jscpd_report(json: &str) -> Option<JscpdReport> {
+    serde_json::from_str(json).ok()
+}
+
+/// Map a parsed report to an outcome. Duplication at or below `threshold`
+/// passes; above it warns (advisory) or, when `block` is set, fails (blocks).
+fn jscpd_outcome(report: &JscpdReport, threshold: f64, block: bool) -> ToolResult {
+    if report.statistics.total.percentage <= threshold {
+        return ToolResult::passed("jscpd");
+    }
+    let text = jscpd_report(report, threshold);
+    if block {
+        ToolResult::failed("jscpd", JSCPD_HINT, &text)
+    } else {
+        ToolResult::warned("jscpd", JSCPD_HINT, &text)
+    }
+}
+
+fn jscpd_report(report: &JscpdReport, threshold: f64) -> String {
+    let pct = report.statistics.total.percentage;
+    let mut lines = vec![format!(
+        "Found duplication: {pct}% (threshold {threshold}%)"
+    )];
+    for dup in report.duplicates.iter().take(MAX_REPORTED_GROUPS) {
+        lines.push(format!(
+            "    {} \u{2194} {} ({} lines)",
+            dup.first_file.name, dup.second_file.name, dup.lines
+        ));
+    }
+    let n = report.duplicates.len();
+    if n > MAX_REPORTED_GROUPS {
+        lines.push(format!(
+            "    ... and {} more pair(s)",
+            n - MAX_REPORTED_GROUPS
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Run jscpd (token-based Type 3 clone detection) over the project. jscpd writes
+/// its JSON to a file, not stdout, so the report is directed to a temp dir and
+/// read back. Fail-open: a missing binary, timeout, or unreadable/unparseable
+/// report all skip rather than block.
+pub fn run_jscpd(
+    project: &ProjectInfo,
+    min_lines: usize,
+    min_tokens: usize,
+    threshold: f64,
+    block: bool,
+    ignore: &[String],
+) -> ToolResult {
+    if !project.has_package_json {
+        return ToolResult::skipped("jscpd");
+    }
+
+    let out_dir = env::temp_dir().join(format!("gates-jscpd-{}", process::id()));
+    // Clear any report left by a prior run whose cleanup failed before this PID
+    // was reused, so a stale report is never read as the current run's result.
+    let _ = fs::remove_dir_all(&out_dir);
+    if let Err(e) = fs::create_dir_all(&out_dir) {
+        eprintln!("gates: jscpd temp dir create failed: {e}");
+        return ToolResult::skipped("jscpd");
+    }
+
+    let bin = resolve::resolve_bin("jscpd", &project.root);
+    let mut cmd = Command::new(&bin);
+    cmd.arg(&project.root)
+        .args(["--reporters", "json"])
+        .arg("--output")
+        .arg(&out_dir)
+        .arg("--silent")
+        .args(["--min-lines", &min_lines.to_string()])
+        .args(["--min-tokens", &min_tokens.to_string()]);
+    if !ignore.is_empty() {
+        cmd.args(["--ignore", &ignore.join(",")]);
+    }
+    cmd.current_dir(&project.root);
+
+    let result = run_command("jscpd", cmd, GATE_TIMEOUT);
+    let outcome = if result.is_skipped() {
+        // Binary missing or timed out: fail-open.
+        result
+    } else {
+        let report_path = out_dir.join("jscpd-report.json");
+        match fs::read_to_string(&report_path) {
+            Ok(json) => match parse_jscpd_report(&json) {
+                Some(report) => jscpd_outcome(&report, threshold, block),
+                None => {
+                    eprintln!("gates: jscpd report parse failed");
+                    ToolResult::skipped("jscpd")
+                }
+            },
+            Err(e) => {
+                eprintln!("gates: jscpd report read failed: {e}");
+                ToolResult::skipped("jscpd")
+            }
+        }
+    };
+
+    if let Err(e) = fs::remove_dir_all(&out_dir) {
+        eprintln!("gates: jscpd temp dir cleanup failed: {e}");
+    }
+    outcome
+}
+
 pub fn run_gate(gate: &GateDefinition, project: &ProjectInfo) -> ToolResult {
     if !(gate.condition)(project) {
         return ToolResult::skipped(gate.name);
@@ -681,6 +861,12 @@ mod tests {
     use crate::test_utils::TempDir;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Mutex, PoisonError};
+
+    /// run_jscpd derives its temp output dir from the process PID, so the three
+    /// end-to-end tests below share one dir. Serialize them so one test's report
+    /// is never read (or wiped) by another running concurrently.
+    static JSCPD_RUN_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_project(has_pkg: bool, has_ts: bool) -> ProjectInfo {
         ProjectInfo {
@@ -848,6 +1034,28 @@ mod tests {
         assert!(r.is_skipped());
         assert!(!r.is_failure());
         assert!(r.output().is_empty());
+    }
+
+    // T-601: a Warned outcome is not a failure (stays out of the block decision).
+    #[test]
+    fn warned_is_not_failure() {
+        let r = ToolResult::warned("jscpd", "hint", "dup");
+        assert!(!r.is_failure());
+    }
+
+    // T-602: a Warned outcome counts as ran, not skipped.
+    #[test]
+    fn warned_is_not_skipped() {
+        let r = ToolResult::warned("jscpd", "hint", "dup");
+        assert!(!r.is_skipped());
+        assert!(r.is_warning());
+    }
+
+    // T-603: a Warned outcome exposes its text via output().
+    #[test]
+    fn warned_exposes_output() {
+        let r = ToolResult::warned("jscpd", "hint", "duplication detail");
+        assert_eq!(r.output(), "duplication detail");
     }
 
     #[test]
@@ -1309,6 +1517,153 @@ test('works', () => {
         assert!(
             result.is_skipped(),
             "only .d.ts inputs leave nothing to analyze"
+        );
+    }
+
+    fn jscpd_json(percentage: f64, duplicates: &str) -> String {
+        format!(
+            r#"{{"statistics":{{"total":{{"percentage":{percentage}}}}},"duplicates":[{duplicates}]}}"#
+        )
+    }
+
+    // T-631: duplication above threshold without block set → Warned (advisory).
+    #[test]
+    fn jscpd_warns_above_threshold_without_block() {
+        let report = parse_jscpd_report(&jscpd_json(12.0, "")).unwrap();
+        let result = jscpd_outcome(&report, 10.0, false);
+        assert!(result.is_warning());
+        assert!(!result.is_failure());
+    }
+
+    // T-632: duplication above threshold with block set → Failed (blocks).
+    #[test]
+    fn jscpd_fails_above_threshold_with_block() {
+        let report = parse_jscpd_report(&jscpd_json(12.0, "")).unwrap();
+        let result = jscpd_outcome(&report, 10.0, true);
+        assert!(result.is_failure());
+        assert!(!result.is_warning());
+    }
+
+    // T-633: duplication below threshold → Passed.
+    #[test]
+    fn jscpd_passes_below_threshold() {
+        let report = parse_jscpd_report(&jscpd_json(8.0, "")).unwrap();
+        let result = jscpd_outcome(&report, 10.0, false);
+        assert!(!result.is_failure());
+        assert!(!result.is_warning());
+        assert!(!result.is_skipped());
+    }
+
+    // T-634: duplication exactly at threshold → Passed (comparison is `>`, not `>=`).
+    #[test]
+    fn jscpd_passes_at_threshold_boundary() {
+        let report = parse_jscpd_report(&jscpd_json(10.0, "")).unwrap();
+        let result = jscpd_outcome(&report, 10.0, false);
+        assert!(!result.is_warning());
+        assert!(!result.is_failure());
+    }
+
+    // T-635: malformed JSON yields None rather than panicking.
+    #[test]
+    fn jscpd_parse_rejects_invalid_json() {
+        assert!(parse_jscpd_report("not json{{{").is_none());
+    }
+
+    // T-636: the report lists each duplicate file pair with its line span.
+    #[test]
+    fn jscpd_report_lists_file_pairs() {
+        let dup = r#"{"lines":7,"firstFile":{"name":"src/a.ts"},"secondFile":{"name":"src/b.ts"}}"#;
+        let report = parse_jscpd_report(&jscpd_json(12.0, dup)).unwrap();
+        let result = jscpd_outcome(&report, 10.0, false);
+        let output = result.output();
+        assert!(output.contains("12%"), "header percentage: {output}");
+        assert!(output.contains("src/a.ts"), "first file: {output}");
+        assert!(output.contains("src/b.ts"), "second file: {output}");
+        assert!(output.contains("7 lines"), "line span: {output}");
+    }
+
+    // T-637: jscpd skips a project without package.json (fail-open).
+    #[test]
+    fn jscpd_skips_without_package_json() {
+        let project = test_project(false, false);
+        let result = run_jscpd(&project, 5, 50, 10.0, false, &[]);
+        assert!(result.is_skipped());
+    }
+
+    /// Install a fake `jscpd` binary that writes `report_body` (when non-empty)
+    /// to the `--output` dir, mirroring how the real jscpd emits its JSON file.
+    fn jscpd_project_with_fake_bin(report_body: &str) -> (TempDir, ProjectInfo) {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new("jscpd-gate");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        let bin_dir = tmp.join("node_modules/.bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let bin = bin_dir.join("jscpd");
+        let script = if report_body.is_empty() {
+            "#!/bin/sh\nexit 0\n".to_owned()
+        } else {
+            format!(
+                "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--output\" ]; then out=\"$2\"; fi\n  shift\ndone\nmkdir -p \"$out\"\ncat > \"$out/jscpd-report.json\" <<'EOF'\n{report_body}\nEOF\n"
+            )
+        };
+        fs::write(&bin, script).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        (tmp, project)
+    }
+
+    // T-638: end-to-end — jscpd writes a report above threshold, gate warns.
+    #[test]
+    fn jscpd_warns_from_written_report() {
+        let _guard = JSCPD_RUN_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let body = r#"{"statistics":{"total":{"percentage":25.0}},"duplicates":[{"lines":7,"firstFile":{"name":"a.ts"},"secondFile":{"name":"b.ts"}}]}"#;
+        let (_tmp, project) = jscpd_project_with_fake_bin(body);
+        let result = run_jscpd(&project, 5, 50, 10.0, false, &[]);
+        assert!(result.is_warning(), "25% over threshold 10 should warn");
+        assert!(result.output().contains("a.ts"));
+    }
+
+    // T-639: a binary that writes no report file skips (fail-open).
+    #[test]
+    fn jscpd_skips_when_report_missing() {
+        let _guard = JSCPD_RUN_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (_tmp, project) = jscpd_project_with_fake_bin("");
+        let result = run_jscpd(&project, 5, 50, 10.0, false, &[]);
+        assert!(result.is_skipped(), "missing report should skip, not block");
+    }
+
+    // T-640: a stale report left in the temp dir (prior run's cleanup failed,
+    // then PID reused) is not read as the current run's result. run_jscpd must
+    // start from a clean output dir.
+    #[test]
+    fn jscpd_ignores_stale_report_from_prior_run() {
+        let _guard = JSCPD_RUN_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let out_dir = env::temp_dir().join(format!("gates-jscpd-{}", process::id()));
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(
+            out_dir.join("jscpd-report.json"),
+            r#"{"statistics":{"total":{"percentage":99.0}},"duplicates":[]}"#,
+        )
+        .unwrap();
+
+        // The current run's binary writes no report (finds nothing / fails to emit).
+        let (_tmp, project) = jscpd_project_with_fake_bin("");
+        let result = run_jscpd(&project, 5, 50, 10.0, false, &[]);
+
+        assert!(
+            result.is_skipped(),
+            "stale report must not be read as the current run: {}",
+            result.output()
         );
     }
 }

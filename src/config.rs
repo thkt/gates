@@ -19,6 +19,11 @@ pub struct GatesConfig {
     pub clone_min_nodes: Option<usize>,
     pub clone_min_lines: Option<usize>,
     pub clone_block_threshold: Option<usize>,
+    pub jscpd_min_lines: Option<usize>,
+    pub jscpd_min_tokens: Option<usize>,
+    pub jscpd_threshold: Option<f64>,
+    pub jscpd_block: Option<bool>,
+    pub jscpd_ignore: Option<Vec<String>>,
     pub source: ConfigSource,
 }
 
@@ -30,6 +35,11 @@ impl Default for GatesConfig {
             clone_min_nodes: None,
             clone_min_lines: None,
             clone_block_threshold: None,
+            jscpd_min_lines: None,
+            jscpd_min_tokens: None,
+            jscpd_threshold: None,
+            jscpd_block: None,
+            jscpd_ignore: None,
             source: ConfigSource::Default,
         }
     }
@@ -40,6 +50,7 @@ struct ToolsJson {
     gates: Option<HashMap<String, serde_json::Value>>,
     coupling: Option<CouplingSection>,
     clone: Option<CloneSection>,
+    jscpd: Option<JscpdSection>,
 }
 
 #[derive(Deserialize)]
@@ -56,6 +67,17 @@ struct CloneSection {
     min_lines: Option<usize>,
     #[serde(rename = "blockThreshold")]
     block_threshold: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct JscpdSection {
+    #[serde(rename = "minLines")]
+    min_lines: Option<usize>,
+    #[serde(rename = "minTokens")]
+    min_tokens: Option<usize>,
+    threshold: Option<f64>,
+    block: Option<bool>,
+    ignore: Option<Vec<String>>,
 }
 
 impl GatesConfig {
@@ -88,6 +110,10 @@ impl GatesConfig {
             parsed.clone.map_or((None, None, None), |c| {
                 (c.min_nodes, c.min_lines, c.block_threshold)
             });
+        let (jscpd_min_lines, jscpd_min_tokens, jscpd_threshold, jscpd_block, jscpd_ignore) =
+            parsed.jscpd.map_or((None, None, None, None, None), |j| {
+                (j.min_lines, j.min_tokens, j.threshold, j.block, j.ignore)
+            });
         let Some(gates_map) = parsed.gates else {
             return Self {
                 gates: None,
@@ -95,6 +121,11 @@ impl GatesConfig {
                 clone_min_nodes,
                 clone_min_lines,
                 clone_block_threshold,
+                jscpd_min_lines,
+                jscpd_min_tokens,
+                jscpd_threshold,
+                jscpd_block,
+                jscpd_ignore,
                 source: ConfigSource::Explicit,
             };
         };
@@ -118,6 +149,11 @@ impl GatesConfig {
             clone_min_nodes,
             clone_min_lines,
             clone_block_threshold,
+            jscpd_min_lines,
+            jscpd_min_tokens,
+            jscpd_threshold,
+            jscpd_block,
+            jscpd_ignore,
             source: ConfigSource::Explicit,
         }
     }
@@ -267,5 +303,43 @@ mod tests {
         assert_eq!(config.clone_min_nodes, Some(40));
         assert_eq!(config.clone_min_lines, None);
         assert_eq!(config.clone_block_threshold, None);
+    }
+
+    // T-621: a full jscpd section is read into every field.
+    #[test]
+    fn reads_jscpd_section() {
+        let dir = setup_dir(Some(
+            r#"{"jscpd":{"minLines":8,"minTokens":60,"threshold":15,"block":true,"ignore":["x"]}}"#,
+        ));
+        let config = GatesConfig::load(&dir);
+        assert_eq!(config.jscpd_min_lines, Some(8));
+        assert_eq!(config.jscpd_min_tokens, Some(60));
+        assert_eq!(config.jscpd_threshold, Some(15.0));
+        assert_eq!(config.jscpd_block, Some(true));
+        assert_eq!(config.jscpd_ignore, Some(vec!["x".to_owned()]));
+    }
+
+    // T-622: absent jscpd section yields no overrides.
+    #[test]
+    fn missing_jscpd_section_yields_none() {
+        let dir = setup_dir(Some(r#"{"gates":{"knip":true}}"#));
+        let config = GatesConfig::load(&dir);
+        assert_eq!(config.jscpd_min_lines, None);
+        assert_eq!(config.jscpd_min_tokens, None);
+        assert_eq!(config.jscpd_threshold, None);
+        assert_eq!(config.jscpd_block, None);
+        assert_eq!(config.jscpd_ignore, None);
+    }
+
+    // T-623: a partial jscpd section leaves unspecified fields None.
+    #[test]
+    fn partial_jscpd_section() {
+        let dir = setup_dir(Some(r#"{"jscpd":{"minLines":8}}"#));
+        let config = GatesConfig::load(&dir);
+        assert_eq!(config.jscpd_min_lines, Some(8));
+        assert_eq!(config.jscpd_min_tokens, None);
+        assert_eq!(config.jscpd_threshold, None);
+        assert_eq!(config.jscpd_block, None);
+        assert_eq!(config.jscpd_ignore, None);
     }
 }
