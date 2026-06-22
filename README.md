@@ -160,6 +160,32 @@ No output means all gates passed. On failure, block JSON is printed to stdout:
 { "decision": "block", "reason": "lint failed. Fix lint errors.\n\nerror output..." }
 ```
 
+### Audit Log
+
+Every run appends its pass/fail decision to `$XDG_DATA_HOME/gates/audit.jsonl` (default `~/.local/share/gates/audit.jsonl`) as one JSON object per line. The write is fail-open, so a logging failure never blocks the agent.
+
+```jsonl
+{"ts":"2026-04-11T11:00:00Z","project":"/Users/me/foo","decision":"fail","failed":["lint","test"]}
+{"ts":"2026-04-11T11:05:30Z","project":"/Users/me/foo","decision":"pass","failed":[]}
+```
+
+| Field      | Type    | Description                         |
+| ---------- | ------- | ----------------------------------- |
+| `ts`       | RFC3339 | Event time in UTC                   |
+| `project`  | string  | Absolute project directory          |
+| `decision` | string  | `pass` or `fail`                    |
+| `failed`   | array   | Failed gate names (empty on a pass) |
+
+Review history with the `show` subcommand:
+
+```bash
+gates show                      # last 20 entries
+gates show --last 50            # last 50 entries
+gates show --decision fail      # only failures, then last 20 of those
+```
+
+It prints an aligned table of `TIMESTAMP  DECISION  PROJECT  FAILED_GATES`. With no log file yet, it prints nothing.
+
 ## Configuration
 
 Add a `gates` key to `.claude/tools.json` in your project root.

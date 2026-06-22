@@ -1,3 +1,4 @@
+mod audit;
 mod circular;
 mod clone;
 mod color;
@@ -288,6 +289,8 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
         return None;
     }
 
+    record_audit(project_dir, &failures, overrides);
+
     if !failures.is_empty() {
         let reason = build_fix_prompt(&format_failures(&failures));
         let block = serde_json::json!({
@@ -298,6 +301,30 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
     }
 
     None
+}
+
+/// Append the pass/fail decision to the audit log. Fail-open: any error is
+/// reported to stderr but never propagated into the hook control flow.
+fn record_audit(
+    project_dir: &Path,
+    failures: &[&tools::ToolResult],
+    overrides: &tools::EnvOverrides,
+) {
+    let Some(dir) = overrides.audit_dir.as_deref() else {
+        return;
+    };
+    let project = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+    let entry = audit::AuditEntry {
+        ts: audit::now_rfc3339(),
+        project: project.to_string_lossy().into_owned(),
+        decision: if failures.is_empty() { "pass" } else { "fail" }.to_owned(),
+        failed: failures.iter().map(|f| f.name.to_owned()).collect(),
+    };
+    if let Err(e) = audit::append(dir, &entry) {
+        eprintln!("gates: audit log write failed: {e}");
+    }
 }
 
 fn warn_missing_tools(results: &[tools::ToolResult], project: &project::ProjectInfo) {
@@ -322,8 +349,64 @@ fn warn_missing_tools(results: &[tools::ToolResult], project: &project::ProjectI
     }
 }
 
+const SHOW_USAGE: &str = "usage: gates show [--last N] [--decision pass|fail]";
+
+/// Parsed `show` options. `None` decision means no filter.
+struct ShowArgs {
+    last: usize,
+    decision: Option<String>,
+}
+
+fn parse_show_args(args: &[String]) -> Result<ShowArgs, String> {
+    let mut last = 20;
+    let mut decision = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--last" => {
+                let v = it.next().ok_or("--last requires a value")?;
+                last = v
+                    .parse()
+                    .map_err(|_| format!("invalid --last value: {v}"))?;
+            }
+            "--decision" => {
+                let v = it.next().ok_or("--decision requires a value")?;
+                if v != "pass" && v != "fail" {
+                    return Err(format!("--decision must be pass or fail, got: {v}"));
+                }
+                decision = Some(v.clone());
+            }
+            other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+    Ok(ShowArgs { last, decision })
+}
+
+fn run_show(args: &[String]) -> i32 {
+    let parsed = match parse_show_args(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("gates: {e}\n{SHOW_USAGE}");
+            return 1;
+        }
+    };
+    let Some(dir) = audit::default_dir() else {
+        return 0;
+    };
+    let entries = audit::query(&dir, parsed.last, parsed.decision.as_deref());
+    if !entries.is_empty() {
+        println!("{}", audit::render(&entries));
+    }
+    0
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    if args.get(1).map(String::as_str) == Some("show") {
+        process::exit(run_show(&args[2..]));
+    }
+
     if args.len() > 2 {
         eprintln!("usage: gates [project_dir]");
         process::exit(1);
@@ -601,11 +684,131 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&fake_knip, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let result = run(&tmp);
+        let audit_dir = tmp.join("audit");
+        let result = run_with_overrides(
+            &tmp,
+            &tools::EnvOverrides {
+                audit_dir: Some(audit_dir.clone()),
+                ..Default::default()
+            },
+        );
         assert!(result.is_some());
         let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
         assert_eq!(json["decision"], "block");
         assert!(json["reason"].as_str().unwrap().contains("\u{2717} knip"));
+
+        // The failure is recorded once with decision=fail and the failed gate.
+        let logged = audit::query(&audit_dir, 20, None);
+        assert_eq!(logged.len(), 1);
+        assert_eq!(logged[0].decision, "fail");
+        assert_eq!(logged[0].failed, vec!["knip".to_owned()]);
+    }
+
+    #[test]
+    fn audit_write_failure_does_not_block_the_hook() {
+        // The OUTCOME constraint: a logging failure never propagates into the
+        // hook control flow. Point audit_dir under a regular file so
+        // create_dir_all fails, then a failing gate must still return its block
+        // JSON without panicking.
+        let tmp = setup_project(r#"{"gates":{"knip":true}}"#, &["package.json"]);
+
+        let bin_dir = tmp.join("node_modules/.bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let fake_knip = bin_dir.join("knip");
+        fs::write(&fake_knip, "#!/bin/sh\necho 'Unused export' >&2\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_knip, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // A file where the audit dir's parent should be → create_dir_all errors.
+        let blocker = tmp.join("blocker");
+        fs::write(&blocker, "").unwrap();
+        let audit_dir = blocker.join("audit");
+
+        let result = run_with_overrides(
+            &tmp,
+            &tools::EnvOverrides {
+                audit_dir: Some(audit_dir),
+                ..Default::default()
+            },
+        );
+
+        assert!(result.is_some());
+        let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+        assert_eq!(json["decision"], "block");
+    }
+
+    #[test]
+    fn audit_records_pass_decision() {
+        let tmp = setup_project(r#"{"gates":{"lint":true}}"#, &["package.json"]);
+        fs::write(
+            tmp.join("package.json"),
+            r#"{"scripts":{"lint":"eslint ."}}"#,
+        )
+        .unwrap();
+        let audit_dir = tmp.join("audit");
+
+        run_with_overrides(
+            &tmp,
+            &tools::EnvOverrides {
+                lint_cmd: Some("true".into()),
+                audit_dir: Some(audit_dir.clone()),
+                ..Default::default()
+            },
+        );
+
+        let logged = audit::query(&audit_dir, 20, None);
+        assert_eq!(logged.len(), 1);
+        assert_eq!(logged[0].decision, "pass");
+        assert!(logged[0].failed.is_empty());
+    }
+
+    #[test]
+    fn show_args_default_to_last_20_no_filter() {
+        let p = parse_show_args(&[]).unwrap();
+        assert_eq!(p.last, 20);
+        assert_eq!(p.decision, None);
+    }
+
+    #[test]
+    fn show_args_parse_last_and_decision() {
+        let args = ["--last", "5", "--decision", "fail"].map(str::to_owned);
+        let p = parse_show_args(&args).unwrap();
+        assert_eq!(p.last, 5);
+        assert_eq!(p.decision.as_deref(), Some("fail"));
+    }
+
+    #[test]
+    fn show_args_reject_invalid_decision() {
+        let args = ["--decision", "maybe"].map(str::to_owned);
+        assert!(parse_show_args(&args).is_err());
+    }
+
+    #[test]
+    fn show_args_reject_non_numeric_last() {
+        let args = ["--last", "x"].map(str::to_owned);
+        assert!(parse_show_args(&args).is_err());
+    }
+
+    #[test]
+    fn show_args_reject_unknown_flag() {
+        let args = ["--bogus".to_owned()];
+        assert!(parse_show_args(&args).is_err());
+    }
+
+    #[test]
+    fn audit_not_written_when_no_gate_runs() {
+        let tmp = setup_project(r#"{"gates":{}}"#, &["package.json"]);
+        let audit_dir = tmp.join("audit");
+
+        run_with_overrides(
+            &tmp,
+            &tools::EnvOverrides {
+                audit_dir: Some(audit_dir.clone()),
+                ..Default::default()
+            },
+        );
+
+        assert!(audit::query(&audit_dir, 20, None).is_empty());
     }
 
     #[test]
