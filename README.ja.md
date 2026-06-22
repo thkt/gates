@@ -170,6 +170,18 @@ gates /path/to/project  # ディレクトリを明示指定
 { "decision": "block", "reason": "lint failed. Fix lint errors.\n\nerror output..." }
 ```
 
+### 終了コード
+
+gates は ADR-0066 Group 3 (Hook tool) の終了コード規約に従い、PreToolUse の対である guardrails と共有します。PostToolUse hook 経路では decision surface は exit 0 を維持します。block 判定は stdout の `{"decision":"block"}` JSON で渡し (Claude Code がエージェントに供給)、pass は無音です。実際の非ゼロコードは直接 CLI 経路でのみ現れます。
+
+| 終了コード | 意味                                                               | 経路       |
+| ---------- | ------------------------------------------------------------------ | ---------- |
+| 0          | 全ゲート通過、または block 判定を stdout JSON で渡す               | hook + CLI |
+| 64         | `EX_USAGE`: 未知フラグ / 引数過多 / 非ディレクトリパス             | CLI        |
+| 74         | `EX_IOERR`: `gates show` の stdout 書込失敗 (BrokenPipe は exit 0) | `show`     |
+
+1 (advisory) / 2 (blocking) / 70 (`EX_SOFTWARE`, 内部障害) は将来の hook 仕様変更に備えて終了コード型に予約されています。現状の hook 経路では advisory/blocking は stdout JSON + exit 0 に対応し、内部障害は fail-open に吸収されます。
+
 ## 設定
 
 プロジェクトルートの `.claude/tools.json` に `gates` キーを追加します。

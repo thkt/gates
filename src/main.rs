@@ -5,6 +5,7 @@ mod color;
 mod config;
 mod coupling;
 mod depgraph;
+mod hook_exit;
 mod project;
 mod reporter;
 mod resolve;
@@ -21,10 +22,17 @@ use std::path::Path;
 use std::process;
 use std::thread;
 
-/// sysexits.h codes used on the `gates show` CLI path. The hook path stays on
-/// 0 (protocol JSON) / 1 (main usage) per the OUTCOME constraint; only the
-/// agent-invoked `show` subcommand adopts sysexits (ADR-0060, #14).
-const EX_USAGE: i32 = 64;
+use hook_exit::HookExitCode;
+
+/// Usage / not-a-directory errors exit with `EX_USAGE` (64) per ADR-0066
+/// Group 3 (#18), on both the direct-CLI default path and the `show`
+/// subcommand. The hook invocation (`gates`, dir = cwd) never trips these.
+fn ex_usage() -> i32 {
+    i32::from(HookExitCode::InputError.code())
+}
+
+/// sysexits `EX_IOERR`, used when `gates show` fails to write stdout. This is an
+/// ADR-0060 I/O code (#14) orthogonal to the Group 3 hook exit semantics.
 const EX_IOERR: i32 = 74;
 
 const CONFIG_HINT: &str = "Gates: using defaults. Customize via .claude/tools.json \u{2014} see https://github.com/thkt/gates#configuration";
@@ -451,7 +459,7 @@ fn run_show(args: &[String]) -> i32 {
         Ok(p) => p,
         Err(e) => {
             eprintln!("gates: {e}\n{SHOW_USAGE}");
-            return EX_USAGE;
+            return ex_usage();
         }
     };
     // A None dir (neither XDG_DATA_HOME nor HOME set) yields no entries, the
@@ -481,7 +489,7 @@ fn main() {
         let project_dir = Path::new(dir);
         if !project_dir.is_dir() {
             eprintln!("gates: not a directory: {}", project_dir.display());
-            process::exit(1);
+            process::exit(ex_usage());
         }
         if let Some(json) = run_post_bash(project_dir, &tools::EnvOverrides::from_env()) {
             println!("{json}");
@@ -491,14 +499,14 @@ fn main() {
 
     if args.len() > 2 {
         eprintln!("usage: gates [project_dir]");
-        process::exit(1);
+        process::exit(ex_usage());
     }
 
     let dir = args.get(1).map(String::as_str).unwrap_or(".");
     let project_dir = Path::new(dir);
     if !project_dir.is_dir() {
         eprintln!("gates: not a directory: {}", project_dir.display());
-        process::exit(1);
+        process::exit(ex_usage());
     }
 
     if let Some(json) = run(project_dir) {
@@ -1096,7 +1104,7 @@ mod tests {
 
     #[test]
     fn run_show_rejects_unknown_flag_with_ex_usage() {
-        assert_eq!(run_show(&["--bogus".to_owned()]), EX_USAGE);
+        assert_eq!(run_show(&["--bogus".to_owned()]), ex_usage());
     }
 
     #[test]
@@ -1221,5 +1229,60 @@ mod tests {
             reason.contains("Banned"),
             "fix prompt should include footer"
         );
+    }
+
+    // T-111: when two gates fail concurrently (knip on its own thread, lint on
+    // the script-gate thread), the decision surface stays exit 0 + stdout JSON:
+    // run returns Some(block JSON) listing both failed gates. Group 3 maps a
+    // blocking decision to HookExitCode::Blocking (2) at the type level, but the
+    // hook wrapper keeps exit 0 — so the testable surface is the returned JSON,
+    // not a process exit code (#18).
+    #[test]
+    fn parallel_gate_failures_return_block_json_listing_both() {
+        let tmp = setup_project(r#"{"gates":{"knip":true,"lint":true}}"#, &["package.json"]);
+        fs::write(
+            tmp.join("package.json"),
+            r#"{"scripts":{"lint":"eslint ."}}"#,
+        )
+        .unwrap();
+
+        let bin_dir = tmp.join("node_modules/.bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let fake_knip = bin_dir.join("knip");
+        fs::write(&fake_knip, "#!/bin/sh\necho 'Unused export' >&2\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_knip, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = run_with_overrides(
+            &tmp,
+            &tools::EnvOverrides {
+                lint_cmd: Some("sh -c 'echo lint-error && exit 1'".into()),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            result.is_some(),
+            "parallel failures should block (exit 0 + JSON)"
+        );
+        let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+        assert_eq!(json["decision"], "block");
+        let reason = json["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("knip"),
+            "reason should list the failed knip gate"
+        );
+        assert!(
+            reason.contains("lint"),
+            "reason should list the failed lint gate"
+        );
+    }
+
+    // T-110 companion: usage errors exit with EX_USAGE (64) per Group 3, the
+    // same code the show path returns. Guards the ex_usage() helper that the
+    // three main() usage/not-a-dir paths share.
+    #[test]
+    fn usage_errors_use_ex_usage_64() {
+        assert_eq!(ex_usage(), 64);
     }
 }
