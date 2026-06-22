@@ -123,7 +123,23 @@ pub const INSTALL_COMMANDS: &[InstallInfo] = &[
         name: "tsgo",
         install: "npm i -g @typescript/native-preview",
     },
+    InstallInfo {
+        name: "oxlint",
+        install: "npm i -D oxlint oxlint-tsgolint",
+    },
 ];
+
+/// `oxlint --type-aware` shells out to the project-local `tsgolint` backend. When it is
+/// absent, oxlint exits nonzero with "Failed to find tsgolint executable" — which the
+/// runner maps to a false `block` (it cannot tell a tool-launch failure from a real
+/// violation). Gate the oxlint gate on tsgolint being resolvable so a tsconfig project
+/// without it stays fail-open (skipped). Issue #31 AC: oxlint/tsgolint absence → skipped.
+///
+/// `resolve_bin` returns the bare name unchanged only on its not-found fallback, so any
+/// other value means it resolved an executable `node_modules/.bin/tsgolint`.
+fn tsgolint_available(root: &Path) -> bool {
+    resolve::resolve_bin("tsgolint", root) != Path::new("tsgolint")
+}
 
 pub const GATES: &[GateDefinition] = &[
     GateDefinition {
@@ -139,6 +155,18 @@ pub const GATES: &[GateDefinition] = &[
         args: &[],
         hint: "Fix type errors.",
         condition: |p| p.has_tsconfig,
+    },
+    // Type-aware lint (backend: tsgolint). `--max-warnings 0` promotes oxlint's
+    // default-severity findings (type-aware rules emit as warnings) to a nonzero
+    // exit so the gate blocks; `--type-check` is omitted to avoid double-reporting
+    // type errors with the tsgo gate. Rule-set tuning is deferred (issue #31).
+    // https://oxc.rs/docs/guide/usage/linter/type-aware.html
+    GateDefinition {
+        name: "oxlint",
+        command: "oxlint",
+        args: &["--type-aware", "--max-warnings", "0"],
+        hint: "Fix type-aware lint violations (e.g. floating promises).",
+        condition: |p| p.has_tsconfig && tsgolint_available(&p.root),
     },
     // dependency-cruiser auto-detects .dependency-cruiser.{js,cjs,mjs,json} since v13,
     // so --config is omitted; the condition gates on the same four formats it detects.
@@ -1161,6 +1189,72 @@ mod tests {
         let gate = gate_by_name("depcruise");
         assert_eq!(gate.command, "dependency-cruiser");
         assert_eq!(gate.args, &["src/"]);
+    }
+
+    /// Builds a tsconfig project, optionally planting an executable
+    /// `node_modules/.bin/tsgolint` — the signal the oxlint gate uses to decide
+    /// whether its `--type-aware` backend can run.
+    fn oxlint_project(with_tsgolint: bool) -> (TempDir, ProjectInfo) {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new("oxlint");
+        fs::create_dir_all(tmp.join(".git")).unwrap();
+        if with_tsgolint {
+            let bin_dir = tmp.join("node_modules/.bin");
+            fs::create_dir_all(&bin_dir).unwrap();
+            let bin = bin_dir.join("tsgolint");
+            fs::write(&bin, "").unwrap();
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: false,
+            has_tsconfig: true,
+        };
+        (tmp, project)
+    }
+
+    #[test]
+    fn oxlint_condition_true_with_tsconfig_and_tsgolint() {
+        let (_tmp, project) = oxlint_project(true);
+        assert!((gate_by_name("oxlint").condition)(&project));
+    }
+
+    #[test]
+    fn oxlint_condition_false_when_tsgolint_absent() {
+        let (_tmp, project) = oxlint_project(false);
+        assert!(
+            !(gate_by_name("oxlint").condition)(&project),
+            "missing tsgolint must keep the gate fail-open (skipped), not false-block"
+        );
+    }
+
+    #[test]
+    fn oxlint_condition_false_without_tsconfig() {
+        let (_tmp, mut project) = oxlint_project(true);
+        project.has_tsconfig = false;
+        assert!(
+            !(gate_by_name("oxlint").condition)(&project),
+            "tsconfig is required even when tsgolint is present"
+        );
+    }
+
+    #[test]
+    fn oxlint_skips_when_tsgolint_absent() {
+        let (_tmp, project) = oxlint_project(false);
+        let result = run_gate(gate_by_name("oxlint"), &project);
+        assert!(
+            result.is_skipped(),
+            "tsconfig project without tsgolint must skip, not block"
+        );
+    }
+
+    #[test]
+    fn oxlint_definition_uses_type_aware_without_type_check() {
+        // Locks the exit-code contract: --max-warnings 0 makes warnings block, and
+        // --type-check is omitted so type errors are not double-reported with tsgo.
+        let gate = gate_by_name("oxlint");
+        assert_eq!(gate.command, "oxlint");
+        assert_eq!(gate.args, &["--type-aware", "--max-warnings", "0"]);
     }
 
     fn run_circular(project: &ProjectInfo) -> ToolResult {
