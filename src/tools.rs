@@ -1,3 +1,4 @@
+use crate::audit;
 use crate::circular;
 use crate::clone;
 use crate::coupling;
@@ -167,6 +168,9 @@ pub struct EnvOverrides {
     pub type_cmd: Option<String>,
     pub unit_cmd: Option<String>,
     pub test_cmd: Option<String>,
+    /// Directory for the audit log. Defaults to XDG resolution; tests inject a
+    /// temp dir so they never touch the real `~/.local/share/gates`.
+    pub audit_dir: Option<PathBuf>,
 }
 
 impl EnvOverrides {
@@ -176,6 +180,7 @@ impl EnvOverrides {
             type_cmd: env::var("TYPE_CMD").ok().filter(|s| !s.is_empty()),
             unit_cmd: env::var("UNIT_CMD").ok().filter(|s| !s.is_empty()),
             test_cmd: env::var("TEST_CMD").ok().filter(|s| !s.is_empty()),
+            audit_dir: audit::default_dir(),
         }
     }
 }
