@@ -15,9 +15,16 @@ mod tools;
 mod traverse;
 
 use std::env;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process;
 use std::thread;
+
+/// sysexits.h codes used on the `gates show` CLI path. The hook path stays on
+/// 0 (protocol JSON) / 1 (main usage) per the OUTCOME constraint; only the
+/// agent-invoked `show` subcommand adopts sysexits (ADR-0060, #14).
+const EX_USAGE: i32 = 64;
+const EX_IOERR: i32 = 74;
 
 const CONFIG_HINT: &str = "Gates: using defaults. Customize via .claude/tools.json \u{2014} see https://github.com/thkt/gates#configuration";
 
@@ -349,17 +356,19 @@ fn warn_missing_tools(results: &[tools::ToolResult], project: &project::ProjectI
     }
 }
 
-const SHOW_USAGE: &str = "usage: gates show [--last N] [--decision pass|fail]";
+const SHOW_USAGE: &str = "usage: gates show [--last N] [--decision pass|fail] [--json]";
 
 /// Parsed `show` options. `None` decision means no filter.
 struct ShowArgs {
     last: usize,
     decision: Option<String>,
+    json: bool,
 }
 
 fn parse_show_args(args: &[String]) -> Result<ShowArgs, String> {
     let mut last = 20;
     let mut decision = None;
+    let mut json = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -376,10 +385,42 @@ fn parse_show_args(args: &[String]) -> Result<ShowArgs, String> {
                 }
                 decision = Some(v.clone());
             }
+            "--json" => json = true,
             other => return Err(format!("unknown argument: {other}")),
         }
     }
-    Ok(ShowArgs { last, decision })
+    Ok(ShowArgs {
+        last,
+        decision,
+        json,
+    })
+}
+
+/// Build the `show` stdout payload. `--json` always emits a JSON array (`[]`
+/// when empty) so an agent parses one machine-readable shape unconditionally;
+/// human mode suppresses output when there is nothing to show.
+fn format_show_output(entries: &[audit::AuditEntry], json: bool) -> Option<String> {
+    if json {
+        Some(serde_json::to_string(entries).expect("AuditEntry serialization is infallible"))
+    } else if entries.is_empty() {
+        None
+    } else {
+        Some(audit::render(entries))
+    }
+}
+
+/// Write one line to stdout, returning an exit code. A closed downstream pipe
+/// (`gates show | head`) exits 0 instead of panicking the way `println!` does;
+/// any other write error maps to EX_IOERR.
+fn write_stdout(s: &str) -> i32 {
+    match writeln!(io::stdout(), "{s}") {
+        Ok(()) => 0,
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => 0,
+        Err(e) => {
+            eprintln!("gates: stdout write failed: {e}");
+            EX_IOERR
+        }
+    }
 }
 
 fn run_show(args: &[String]) -> i32 {
@@ -387,17 +428,20 @@ fn run_show(args: &[String]) -> i32 {
         Ok(p) => p,
         Err(e) => {
             eprintln!("gates: {e}\n{SHOW_USAGE}");
-            return 1;
+            return EX_USAGE;
         }
     };
-    let Some(dir) = audit::default_dir() else {
-        return 0;
+    // A None dir (neither XDG_DATA_HOME nor HOME set) yields no entries, the
+    // same shape as an empty log. Route it through format_show_output so --json
+    // still emits `[]` instead of leaking empty stdout past the array contract.
+    let entries = match audit::default_dir() {
+        Some(dir) => audit::query(&dir, parsed.last, parsed.decision.as_deref()),
+        None => Vec::new(),
     };
-    let entries = audit::query(&dir, parsed.last, parsed.decision.as_deref());
-    if !entries.is_empty() {
-        println!("{}", audit::render(&entries));
+    match format_show_output(&entries, parsed.json) {
+        Some(out) => write_stdout(&out),
+        None => 0,
     }
-    0
 }
 
 fn main() {
@@ -767,6 +811,61 @@ mod tests {
         let p = parse_show_args(&[]).unwrap();
         assert_eq!(p.last, 20);
         assert_eq!(p.decision, None);
+        assert!(!p.json);
+    }
+
+    #[test]
+    fn show_args_parse_json_flag() {
+        let p = parse_show_args(&["--json".to_owned()]).unwrap();
+        assert!(p.json);
+        // --json composes with the existing filters.
+        let args = ["--decision", "fail", "--json"].map(str::to_owned);
+        let p = parse_show_args(&args).unwrap();
+        assert!(p.json);
+        assert_eq!(p.decision.as_deref(), Some("fail"));
+    }
+
+    fn audit_entry(ts: &str, decision: &str, failed: &[&str]) -> audit::AuditEntry {
+        audit::AuditEntry {
+            ts: ts.to_owned(),
+            project: "/p".to_owned(),
+            decision: decision.to_owned(),
+            failed: failed.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn show_json_emits_parseable_array_round_tripping_entries() {
+        let entries = vec![
+            audit_entry("2026-04-11T11:00:00Z", "fail", &["lint", "test"]),
+            audit_entry("2026-04-11T11:05:30Z", "pass", &[]),
+        ];
+        let out = format_show_output(&entries, true).unwrap();
+        let parsed: Vec<audit::AuditEntry> = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed, entries);
+    }
+
+    #[test]
+    fn show_json_empty_emits_empty_array() {
+        assert_eq!(format_show_output(&[], true).as_deref(), Some("[]"));
+    }
+
+    #[test]
+    fn show_human_empty_suppresses_output() {
+        assert!(format_show_output(&[], false).is_none());
+    }
+
+    #[test]
+    fn show_human_non_empty_renders_table() {
+        let entries = vec![audit_entry("2026-04-11T11:00:00Z", "fail", &["lint"])];
+        let out = format_show_output(&entries, false).unwrap();
+        assert!(out.starts_with("TIMESTAMP"));
+        assert!(out.contains("lint"));
+    }
+
+    #[test]
+    fn run_show_rejects_unknown_flag_with_ex_usage() {
+        assert_eq!(run_show(&["--bogus".to_owned()]), EX_USAGE);
     }
 
     #[test]

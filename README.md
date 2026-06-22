@@ -182,9 +182,10 @@ Review history with the `show` subcommand:
 gates show                      # last 20 entries
 gates show --last 50            # last 50 entries
 gates show --decision fail      # only failures, then last 20 of those
+gates show --json               # entries as a JSON array, for agents
 ```
 
-It prints an aligned table of `TIMESTAMP  DECISION  PROJECT  FAILED_GATES`. With no log file yet, it prints nothing.
+It prints an aligned table of `TIMESTAMP  DECISION  PROJECT  FAILED_GATES`. With no log file yet, it prints nothing. `--json` emits the matched entries as a JSON array on stdout (`[]` when empty) for machine consumption, composes with `--last`/`--decision`, and survives `| head` without a broken-pipe panic. Unknown flags exit with code 64 (`EX_USAGE`).
 
 ## Configuration
 
