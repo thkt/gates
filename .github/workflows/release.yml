@@ -187,11 +187,22 @@ jobs:
       contents: read
 
     steps:
+      - name: Generate sentinels App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SENTINELS_APP_ID }}
+          private-key: ${{ secrets.SENTINELS_APP_PRIVATE_KEY }}
+          owner: thkt
+          repositories: sentinels
+          permission-contents: write
+
       - name: Checkout sentinels
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: thkt/sentinels
-          token: ${{ secrets.SENTINELS_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
 
       - name: Update plugin version
         env:
@@ -206,9 +217,11 @@ jobs:
         env:
           VERSION: ${{ needs.release.outputs.version }}
           TOOL: gates
+          TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${TOKEN}@github.com/thkt/sentinels.git"
           git add "${TOOL}/.claude-plugin/plugin.json"
           git diff --staged --quiet && echo "No changes to commit" && exit 0
           git commit -m "sync: ${TOOL} v${VERSION}"
