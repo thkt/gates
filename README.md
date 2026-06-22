@@ -172,6 +172,18 @@ No output means all gates passed. On failure, block JSON is printed to stdout:
 { "decision": "block", "reason": "lint failed. Fix lint errors.\n\nerror output..." }
 ```
 
+### Exit Codes
+
+gates follows the ADR-0066 Group 3 (Hook tool) exit-code convention, shared with its PreToolUse role-pair guardrails. On the PostToolUse hook path the decision surface stays exit 0: a blocking decision is delivered as stdout `{"decision":"block"}` JSON (which Claude Code feeds to the agent) and a pass is silent. Real non-zero codes appear only on the direct-CLI path.
+
+| Exit | Meaning                                                              | Path       |
+| ---- | -------------------------------------------------------------------- | ---------- |
+| 0    | All gates pass, or a blocking decision delivered via stdout JSON     | hook + CLI |
+| 64   | `EX_USAGE`: unknown flag, too many arguments, or non-directory path  | CLI        |
+| 74   | `EX_IOERR`: `gates show` failed to write stdout (BrokenPipe exits 0) | `show`     |
+
+Codes 1 (advisory), 2 (blocking), and 70 (`EX_SOFTWARE`, internal fault) are reserved in the exit-code type for a future hook-spec change. On the current hook path advisory/blocking map to stdout JSON + exit 0, and internal faults are absorbed by fail-open.
+
 ### Audit Log
 
 Every run appends its pass/fail decision to `$XDG_DATA_HOME/gates/audit.jsonl` (default `~/.local/share/gates/audit.jsonl`) as one JSON object per line. The write is fail-open, so a logging failure never blocks the agent.
