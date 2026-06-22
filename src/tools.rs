@@ -896,7 +896,7 @@ pub fn run_gate(gate: &GateDefinition, project: &ProjectInfo) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::TempDir;
+    use crate::test_utils::{TempDir, link_fake_bin};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Mutex, PoisonError};
@@ -1694,24 +1694,22 @@ test('works', () => {
         assert!(result.is_skipped());
     }
 
-    /// Install a fake `jscpd` binary that writes `report_body` (when non-empty)
-    /// to the `--output` dir, mirroring how the real jscpd emits its JSON file.
+    /// Install a fake `jscpd` via a committed, exec-only fixture (never written
+    /// during the test, so it can't hit the write-then-exec ETXTBSY race — #59).
+    /// When `report_body` is non-empty the `jscpd-emit-report` fixture copies it
+    /// from a plain data file (`jscpd-report-src.json`, read via cwd = project
+    /// root) into the `--output` dir, mirroring how real jscpd emits its JSON.
+    /// Empty body uses `jscpd-noop`, which exits 0 without writing a report.
     fn jscpd_project_with_fake_bin(report_body: &str) -> (TempDir, ProjectInfo) {
-        use std::os::unix::fs::PermissionsExt;
         let tmp = TempDir::new("jscpd-gate");
         fs::write(tmp.join("package.json"), "{}").unwrap();
-        let bin_dir = tmp.join("node_modules/.bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-        let bin = bin_dir.join("jscpd");
-        let script = if report_body.is_empty() {
-            "#!/bin/sh\nexit 0\n".to_owned()
+        let fixture = if report_body.is_empty() {
+            "jscpd-noop"
         } else {
-            format!(
-                "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--output\" ]; then out=\"$2\"; fi\n  shift\ndone\nmkdir -p \"$out\"\ncat > \"$out/jscpd-report.json\" <<'EOF'\n{report_body}\nEOF\n"
-            )
+            fs::write(tmp.join("jscpd-report-src.json"), report_body).unwrap();
+            "jscpd-emit-report"
         };
-        fs::write(&bin, script).unwrap();
-        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        link_fake_bin(&tmp, "jscpd", fixture);
         let project = ProjectInfo {
             root: tmp.to_path_buf(),
             has_package_json: true,

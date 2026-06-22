@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::ops::Deref;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,4 +38,25 @@ impl Deref for TempDir {
     fn deref(&self) -> &Path {
         &self.path
     }
+}
+
+/// Symlink a committed, exec-only fixture from `tests/fixtures/<fixture>` to
+/// `<project>/node_modules/.bin/<bin_name>`. The exec target is never written
+/// during the test, so no parallel fork can hold a writable fd to the file the
+/// gate execs — structurally removing the write-then-exec ETXTBSY race that
+/// `fs::write` + `set_permissions` + exec hit under llvm-cov instrumentation (#59).
+pub fn link_fake_bin(project: &Path, bin_name: &str, fixture: &str) {
+    let bin_dir = project.join("node_modules/.bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(fixture);
+    // symlink does not validate its target; assert first so a missing or
+    // renamed fixture fails here with the path, not later as an opaque exec error.
+    assert!(
+        fixture_path.exists(),
+        "missing fixture: {}",
+        fixture_path.display()
+    );
+    symlink(&fixture_path, bin_dir.join(bin_name)).unwrap();
 }

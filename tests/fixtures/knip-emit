@@ -1,0 +1,3 @@
+#!/bin/sh
+echo 'emit' > out.js
+exit 1
