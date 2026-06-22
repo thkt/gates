@@ -9,6 +9,7 @@ mod project;
 mod reporter;
 mod resolve;
 mod sanitize;
+mod snapshot;
 #[cfg(test)]
 mod test_utils;
 mod tools;
@@ -88,6 +89,19 @@ fn format_failures(failures: &[&tools::ToolResult]) -> String {
 
 fn run(project_dir: &Path) -> Option<String> {
     run_with_overrides(project_dir, &tools::EnvOverrides::from_env())
+}
+
+/// Write the current fileset digest to the snapshot store. No-op when no
+/// snapshot dir is configured (XDG/HOME unset). A write failure reports to
+/// stderr and returns without blocking (fail-open); stdout is never touched.
+fn record_snapshot(project_root: &Path, overrides: &tools::EnvOverrides) {
+    let Some(dir) = overrides.snapshot_dir.as_deref() else {
+        return;
+    };
+    let digest = snapshot::compute_digest(project_root);
+    if let Err(e) = snapshot::write(dir, project_root, &digest) {
+        eprintln!("gates: snapshot write failed: {e}");
+    }
 }
 
 fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Option<String> {
@@ -289,6 +303,15 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
         eprintln!("{summary}");
     }
 
+    // Record the post-gate fileset digest so a following Bash-triggered
+    // `gates post-bash` does not re-detect this same edit (FR-006 double-detection
+    // guard). Recording here, after the gates have run, captures the actual
+    // on-disk state: a gate that writes a target file (e.g. a project type-check
+    // script emitting `.js`) is reflected in the stored digest, so the next
+    // unchanged `post-bash` still fast-exits instead of re-triggering forever.
+    // Write failures degrade to stderr only (fail-open, never block).
+    record_snapshot(&project.root, overrides);
+
     let failures: Vec<_> = results.iter().filter(|r| r.is_failure()).collect();
     let ran_count = results.iter().filter(|r| !r.is_skipped()).count();
 
@@ -451,6 +474,21 @@ fn main() {
         process::exit(run_show(&args[2..]));
     }
 
+    // `gates post-bash [dir]`: PostToolUse Bash trigger (issue #17). Runs gates
+    // only when the fileset changed since the last run; otherwise fast-exits.
+    if args.get(1).map(String::as_str) == Some("post-bash") {
+        let dir = args.get(2).map(String::as_str).unwrap_or(".");
+        let project_dir = Path::new(dir);
+        if !project_dir.is_dir() {
+            eprintln!("gates: not a directory: {}", project_dir.display());
+            process::exit(1);
+        }
+        if let Some(json) = run_post_bash(project_dir, &tools::EnvOverrides::from_env()) {
+            println!("{json}");
+        }
+        return;
+    }
+
     if args.len() > 2 {
         eprintln!("usage: gates [project_dir]");
         process::exit(1);
@@ -466,6 +504,24 @@ fn main() {
     if let Some(json) = run(project_dir) {
         println!("{json}");
     }
+}
+
+/// PostToolUse Bash entry (issue #17): run gates only when the gated fileset
+/// changed since the last recorded snapshot. A matching stored digest means no
+/// gated file changed, so the gates are skipped (fast-exit). A missing snapshot
+/// dir, a missing/corrupt stored digest, or a mismatch all fall through to a full
+/// run (fail-open = run rather than skip). The run records the fresh digest.
+fn run_post_bash(project_dir: &Path, overrides: &tools::EnvOverrides) -> Option<String> {
+    let project = project::ProjectInfo::detect(project_dir);
+    if let Some(dir) = overrides.snapshot_dir.as_deref() {
+        let current = snapshot::compute_digest(&project.root);
+        if let Some(stored) = snapshot::read_stored(dir, &project.root)
+            && stored == current
+        {
+            return None;
+        }
+    }
+    run_with_overrides(project_dir, overrides)
 }
 
 #[cfg(test)]
@@ -497,6 +553,181 @@ mod tests {
         lines.push(reporter::FOOTER_SEPARATOR);
         lines.push(&blocked);
         lines.join("\n")
+    }
+
+    // --- issue #17 `gates post-bash` integration tests (M2) ---
+
+    // Project with a single failing gate (knip exits 1). Used to make a run
+    // observable: if the gate runs, run_post_bash returns Some(block JSON); if
+    // the digest matches and the run is skipped, it returns None.
+    fn setup_failing_knip() -> TempDir {
+        let tmp = setup_project(r#"{"gates":{"knip":true}}"#, &["package.json"]);
+        let bin_dir = tmp.join("node_modules/.bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let fake_knip = bin_dir.join("knip");
+        fs::write(&fake_knip, "#!/bin/sh\necho 'Unused export' >&2\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_knip, fs::Permissions::from_mode(0o755)).unwrap();
+        tmp
+    }
+
+    // T-014: a stored digest matching the current fileset skips the run entirely
+    // (fast-exit), so the failing gate never fires and the result is None.
+    #[test]
+    fn post_bash_skips_when_unchanged_t014() {
+        let tmp = setup_failing_knip();
+        let snap_dir = tmp.join("snap");
+        let root = project::ProjectInfo::detect(&tmp).root;
+        snapshot::write(&snap_dir, &root, &snapshot::compute_digest(&root)).unwrap();
+
+        let result = run_post_bash(
+            &tmp,
+            &tools::EnvOverrides {
+                snapshot_dir: Some(snap_dir),
+                audit_dir: Some(tmp.join("audit")),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_none());
+    }
+
+    // T-015: a fileset change after the baseline digest was stored makes the run
+    // fire (block JSON), and the snapshot is refreshed to the post-run digest.
+    #[test]
+    fn post_bash_runs_and_updates_digest_when_changed_t015() {
+        let tmp = setup_failing_knip();
+        fs::write(tmp.join("a.ts"), "const x = 1;").unwrap();
+        let snap_dir = tmp.join("snap");
+        let root = project::ProjectInfo::detect(&tmp).root;
+        snapshot::write(&snap_dir, &root, &snapshot::compute_digest(&root)).unwrap();
+
+        fs::write(tmp.join("a.ts"), "const x = 1; const y = 2;").unwrap();
+        let result = run_post_bash(
+            &tmp,
+            &tools::EnvOverrides {
+                snapshot_dir: Some(snap_dir.clone()),
+                audit_dir: Some(tmp.join("audit")),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_some());
+        let stored = snapshot::read_stored(&snap_dir, &root).unwrap();
+        assert_eq!(stored, snapshot::compute_digest(&root));
+    }
+
+    // T-016: with every gate disabled (empty gates map) the run is a no-op and
+    // returns None (exit 0). FR-005 step 1 reduces to "no block".
+    #[test]
+    fn post_bash_no_op_when_no_enabled_gates_t016() {
+        let tmp = setup_project(r#"{"gates":{}}"#, &["package.json"]);
+        let result = run_post_bash(
+            &tmp,
+            &tools::EnvOverrides {
+                snapshot_dir: Some(tmp.join("snap")),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_none());
+    }
+
+    // T-017: a first run (no stored baseline) with a failing gate emits the
+    // block JSON to stdout (returned by run_post_bash).
+    #[test]
+    fn post_bash_emits_block_json_on_failure_t017() {
+        let tmp = setup_failing_knip();
+        let result = run_post_bash(
+            &tmp,
+            &tools::EnvOverrides {
+                snapshot_dir: Some(tmp.join("snap")),
+                audit_dir: Some(tmp.join("audit")),
+                ..Default::default()
+            },
+        );
+        let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+        assert_eq!(json["decision"], "block");
+        assert!(json["reason"].as_str().unwrap().contains("\u{2717} knip"));
+    }
+
+    // T-019: the FR-006 snapshot side effect must not alter the block output.
+    // The same failing-gate scenario produces byte-identical JSON with and
+    // without snapshot_dir configured.
+    #[test]
+    fn gates_dir_output_is_byte_identical_t019() {
+        let without = {
+            let tmp = setup_failing_knip();
+            run_with_overrides(
+                &tmp,
+                &tools::EnvOverrides {
+                    audit_dir: Some(tmp.join("audit")),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let with = {
+            let tmp = setup_failing_knip();
+            run_with_overrides(
+                &tmp,
+                &tools::EnvOverrides {
+                    snapshot_dir: Some(tmp.join("snap")),
+                    audit_dir: Some(tmp.join("audit")),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(without, with);
+    }
+
+    // T-021: end-to-end detection loop. A baseline run records the digest, a
+    // no-change run skips, and a `sed -i`-style source edit makes the next run
+    // fire again.
+    #[test]
+    fn post_bash_fires_after_sed_edit_t021() {
+        let tmp = setup_failing_knip();
+        fs::write(tmp.join("a.ts"), "const x = 1;").unwrap();
+        let overrides = tools::EnvOverrides {
+            snapshot_dir: Some(tmp.join("snap")),
+            audit_dir: Some(tmp.join("audit")),
+            ..Default::default()
+        };
+
+        assert!(run_post_bash(&tmp, &overrides).is_some());
+        assert!(run_post_bash(&tmp, &overrides).is_none());
+
+        fs::write(tmp.join("a.ts"), "const x = 1; // edited").unwrap();
+        assert!(run_post_bash(&tmp, &overrides).is_some());
+    }
+
+    // A gate that writes a target file (here a fake knip that emits `out.js`)
+    // must not re-trigger forever: the digest is recorded after the gate runs,
+    // so it captures the emitted file. The first run fires (no baseline), but a
+    // following no-change run must skip. Under a pre-gate digest the emitted
+    // file would never match the stored digest and every Bash call would re-run.
+    fn setup_emitting_knip() -> TempDir {
+        let tmp = setup_project(r#"{"gates":{"knip":true}}"#, &["package.json"]);
+        let bin_dir = tmp.join("node_modules/.bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let fake_knip = bin_dir.join("knip");
+        fs::write(&fake_knip, "#!/bin/sh\necho 'emit' > out.js\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_knip, fs::Permissions::from_mode(0o755)).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn post_bash_does_not_retrigger_after_gate_emits_target_file_t023() {
+        let tmp = setup_emitting_knip();
+        let overrides = tools::EnvOverrides {
+            snapshot_dir: Some(tmp.join("snap")),
+            audit_dir: Some(tmp.join("audit")),
+            ..Default::default()
+        };
+
+        // First run: no baseline, gate runs and emits out.js, returns block.
+        assert!(run_post_bash(&tmp, &overrides).is_some());
+        // The emitted file is part of the recorded digest, so a no-change run skips.
+        assert!(run_post_bash(&tmp, &overrides).is_none());
     }
 
     #[test]
