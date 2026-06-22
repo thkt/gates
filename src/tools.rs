@@ -171,6 +171,10 @@ pub struct EnvOverrides {
     /// Directory for the audit log. Defaults to XDG resolution; tests inject a
     /// temp dir so they never touch the real `~/.local/share/gates`.
     pub audit_dir: Option<PathBuf>,
+    /// Directory for the per-project filesystem-delta snapshot (issue #17).
+    /// Defaults to the `snapshots/` subdir of the audit dir; tests inject a temp
+    /// dir. `None` (XDG/HOME unset) makes reads "changed" and writes a no-op.
+    pub snapshot_dir: Option<PathBuf>,
 }
 
 impl EnvOverrides {
@@ -181,6 +185,7 @@ impl EnvOverrides {
             unit_cmd: env::var("UNIT_CMD").ok().filter(|s| !s.is_empty()),
             test_cmd: env::var("TEST_CMD").ok().filter(|s| !s.is_empty()),
             audit_dir: audit::default_dir(),
+            snapshot_dir: audit::default_dir().map(|d| d.join("snapshots")),
         }
     }
 }

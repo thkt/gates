@@ -139,6 +139,16 @@ Add to `~/.claude/settings.json`:
             "timeout": 70000
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gates post-bash",
+            "timeout": 70000
+          }
+        ]
       }
     ]
   }
@@ -146,6 +156,8 @@ Add to `~/.claude/settings.json`:
 ```
 
 When registered as a PostToolUse hook, `gates` runs after each file write/edit and provides failure feedback to the agent.
+
+The `Bash` matcher catches edits made through the shell (`sed -i`, `cat >`, heredocs, `tee`, `tar x`, `cp -p`, `git checkout`, build scripts) that the `Write|Edit|MultiEdit` matcher misses. `gates post-bash` compares the current gated fileset against a stored digest and runs the gates only when a gated source or config file actually changed; an unchanged fileset fast-exits in a few milliseconds, so it adds negligible overhead to ordinary shell commands.
 
 ### Direct Execution
 
