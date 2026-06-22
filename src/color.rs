@@ -26,6 +26,14 @@ pub fn bold_green(text: &str) -> String {
     wrap("1;32", text)
 }
 
+pub fn yellow(text: &str) -> String {
+    wrap("33", text)
+}
+
+pub fn bold_yellow(text: &str) -> String {
+    wrap("1;33", text)
+}
+
 pub fn dim(text: &str) -> String {
     wrap("2", text)
 }
