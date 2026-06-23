@@ -2,7 +2,9 @@
 .yomu/
 .claude/
 .playwright-cli/
-docs/
+docs/*
+!docs/decisions/
+!docs/audit/
 target/
 workspace/
 
