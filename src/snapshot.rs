@@ -359,7 +359,7 @@ mod tests {
 
     // T-018: double-detection prevention — after the W/E/M path writes the
     // digest, a follow-up read matches and recompute is unchanged, so the next
-    // `gates post-bash` would skip. (Unit-level logic; full dispatch in main.rs.)
+    // `gates changed` would skip. (Unit-level logic; full dispatch in main.rs.)
     #[test]
     fn write_then_read_matches_so_followup_skips_t018() {
         let dir = TempDir::new("snap-t018-dir");
