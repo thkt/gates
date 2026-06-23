@@ -5,7 +5,7 @@ use crate::coupling;
 use crate::depgraph;
 use crate::project::ProjectInfo;
 use crate::resolve;
-use crate::runner::{GATE_TIMEOUT, ToolResult, run_command, run_command_with_label};
+use crate::runner::{GATE_TIMEOUT, ToolResult, join_or_skip, run_command, run_command_with_label};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::env;
@@ -254,7 +254,7 @@ pub fn run_script_gates(gates: &[ScriptGate], project_dir: &Path) -> Vec<ToolRes
         let cmd_str = g.command.clone();
         let hint = g.hint;
         let dir = project_dir.to_path_buf();
-        thread::spawn(move || run_shell_command("lint", &cmd_str, hint, &dir))
+        thread::spawn(move || vec![run_shell_command("lint", &cmd_str, hint, &dir)])
     });
 
     if let Some(tc) = type_check {
@@ -274,13 +274,7 @@ pub fn run_script_gates(gates: &[ScriptGate], project_dir: &Path) -> Vec<ToolRes
     }
 
     if let Some(handle) = lint_handle {
-        match handle.join() {
-            Ok(r) => results.push(r),
-            Err(e) => {
-                eprintln!("gates: lint thread panicked: {e:?}");
-                results.push(ToolResult::skipped("lint"));
-            }
-        }
+        results.extend(join_or_skip(handle.join(), &["lint"]));
     }
 
     results

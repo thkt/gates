@@ -113,17 +113,10 @@ type GateTask = (
     thread::JoinHandle<Vec<runner::ToolResult>>,
 );
 
-/// Join one gate thread into `results`. Owns the panic→`skipped` mapping in one
-/// place: a panicked gate degrades to a `skipped` result per fallback name
-/// rather than aborting the hook (OUTCOME fail-open constraint).
+/// Join one gate thread into `results`, delegating the panic→`skipped` mapping
+/// to [`runner::join_or_skip`] — the single home of the fail-open policy.
 fn join_into(results: &mut Vec<runner::ToolResult>, (fallback, handle): GateTask) {
-    match handle.join() {
-        Ok(gate_results) => results.extend(gate_results),
-        Err(e) => {
-            eprintln!("gates: {} thread panicked: {e:?}", fallback.join("+"));
-            results.extend(fallback.into_iter().map(runner::ToolResult::skipped));
-        }
-    }
+    results.extend(runner::join_or_skip(handle.join(), &fallback));
 }
 
 fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Option<String> {

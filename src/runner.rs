@@ -201,6 +201,25 @@ pub(crate) fn run_command_with_label(
     }
 }
 
+/// Canonical statement of the panic→`skipped` fail-open policy (ADR-0001).
+///
+/// Maps a joined gate thread into results: on success the thread's results pass
+/// through unchanged; on panic the gate degrades to one `skipped` per fallback
+/// name rather than aborting the hook. Every gate join site delegates here so
+/// the policy lives in exactly one place and cannot drift between sites.
+pub fn join_or_skip(
+    joined: thread::Result<Vec<ToolResult>>,
+    fallback: &[&'static str],
+) -> Vec<ToolResult> {
+    match joined {
+        Ok(results) => results,
+        Err(e) => {
+            eprintln!("gates: {} thread panicked: {e:?}", fallback.join("+"));
+            fallback.iter().copied().map(ToolResult::skipped).collect()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +284,26 @@ mod tests {
         let cmd = Command::new("nonexistent-binary-99999");
         let result = run_command("missing", cmd, Duration::from_secs(5));
         assert!(result.is_skipped());
+    }
+
+    // A non-panicking thread's results pass through join_or_skip unchanged.
+    #[test]
+    fn join_or_skip_passes_results_through_on_success() {
+        let handle = thread::spawn(|| vec![ToolResult::passed("lint")]);
+        let results = join_or_skip(handle.join(), &["lint"]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "lint");
+        assert!(matches!(results[0].outcome, GateOutcome::Passed));
+    }
+
+    // The lint-thread fail-open path: a panicked gate degrades to skipped("lint")
+    // (ADR-0001). Pins the single-name policy the run_script_gates lint site uses.
+    #[test]
+    fn join_or_skip_maps_lint_panic_to_skipped() {
+        let handle = thread::spawn(|| -> Vec<ToolResult> { panic!("lint blew up") });
+        let results = join_or_skip(handle.join(), &["lint"]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "lint");
+        assert!(results[0].is_skipped());
     }
 }
