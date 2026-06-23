@@ -112,6 +112,28 @@ fn record_snapshot(project_root: &Path, overrides: &tools::EnvOverrides) {
     }
 }
 
+/// A spawned gate: its skip-fallback names paired with the join handle. Every
+/// gate thread yields `Vec<ToolResult>` (single-result gates a 1-element vec) so
+/// one join loop drains them all. The fallback names are the gates emitted as
+/// `skipped` if the thread panics.
+type GateTask = (
+    Vec<&'static str>,
+    thread::JoinHandle<Vec<tools::ToolResult>>,
+);
+
+/// Join one gate thread into `results`. Owns the panic→`skipped` mapping in one
+/// place: a panicked gate degrades to a `skipped` result per fallback name
+/// rather than aborting the hook (OUTCOME fail-open constraint).
+fn join_into(results: &mut Vec<tools::ToolResult>, (fallback, handle): GateTask) {
+    match handle.join() {
+        Ok(gate_results) => results.extend(gate_results),
+        Err(e) => {
+            eprintln!("gates: {} thread panicked: {e:?}", fallback.join("+"));
+            results.extend(fallback.into_iter().map(tools::ToolResult::skipped));
+        }
+    }
+}
+
 fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Option<String> {
     let config = config::GatesConfig::load(project_dir);
 
@@ -141,67 +163,62 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
             .collect()
     };
 
-    let litmus_enabled = config.is_enabled("litmus");
     let circular_enabled = config.is_enabled("circular");
     let coupling_enabled = config.is_enabled("coupling");
-    let clone_enabled = config.is_enabled("clone");
-    let jscpd_enabled = config.is_enabled("jscpd");
 
-    let total_enabled = enabled.len()
-        + script_gates.len()
-        + usize::from(litmus_enabled)
-        + usize::from(circular_enabled)
-        + usize::from(coupling_enabled)
-        + usize::from(clone_enabled)
-        + usize::from(jscpd_enabled);
-    if total_enabled == 0 {
-        return None;
+    let mut tasks: Vec<GateTask> = Vec::new();
+
+    for (idx, gate) in enabled {
+        let p = project.clone();
+        let name = gate.name;
+        tasks.push((
+            vec![name],
+            thread::spawn(move || vec![tools::run_gate(&tools::GATES[idx], &p)]),
+        ));
     }
 
-    let handles: Vec<_> = enabled
-        .into_iter()
-        .map(|(idx, gate)| {
-            let p = project.clone();
-            let name = gate.name;
-            (
-                name,
-                thread::spawn(move || tools::run_gate(&tools::GATES[idx], &p)),
-            )
-        })
-        .collect();
-
-    let litmus_handle = if litmus_enabled {
+    if config.is_enabled("litmus") {
         let p = project.clone();
-        Some(thread::spawn(move || tools::run_litmus(&p)))
-    } else {
-        None
-    };
+        tasks.push((
+            vec!["litmus"],
+            thread::spawn(move || vec![tools::run_litmus(&p)]),
+        ));
+    }
 
-    let ca_threshold = config.coupling_ca_threshold;
-    let graph_handle = if circular_enabled || coupling_enabled {
+    if circular_enabled || coupling_enabled {
         let p = project.clone();
-        Some(thread::spawn(move || {
-            tools::run_graph_gates(&p, circular_enabled, coupling_enabled, ca_threshold)
-        }))
-    } else {
-        None
-    };
+        let ca_threshold = config.coupling_ca_threshold;
+        let mut fallback = Vec::new();
+        if circular_enabled {
+            fallback.push("circular");
+        }
+        if coupling_enabled {
+            fallback.push("coupling");
+        }
+        tasks.push((
+            fallback,
+            thread::spawn(move || {
+                tools::run_graph_gates(&p, circular_enabled, coupling_enabled, ca_threshold)
+            }),
+        ));
+    }
 
-    let clone_handle = if clone_enabled {
+    if config.is_enabled("clone") {
         let p = project.clone();
         let min_nodes = config.clone_min_nodes.unwrap_or(clone::DEFAULT_MIN_NODES);
         let min_lines = config.clone_min_lines.unwrap_or(clone::DEFAULT_MIN_LINES);
         let block_threshold = config
             .clone_block_threshold
             .unwrap_or(clone::DEFAULT_BLOCK_THRESHOLD);
-        Some(thread::spawn(move || {
-            tools::run_clone(&p, min_nodes, min_lines, block_threshold)
-        }))
-    } else {
-        None
-    };
+        tasks.push((
+            vec!["clone"],
+            thread::spawn(move || {
+                vec![tools::run_clone(&p, min_nodes, min_lines, block_threshold)]
+            }),
+        ));
+    }
 
-    let jscpd_handle = if jscpd_enabled {
+    if config.is_enabled("jscpd") {
         let p = project.clone();
         let min_lines = config
             .jscpd_min_lines
@@ -219,89 +236,32 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
                 .map(|s| (*s).to_owned())
                 .collect()
         });
-        Some(thread::spawn(move || {
-            tools::run_jscpd(&p, min_lines, min_tokens, threshold, block, &ignore)
-        }))
-    } else {
-        None
-    };
+        tasks.push((
+            vec!["jscpd"],
+            thread::spawn(move || {
+                vec![tools::run_jscpd(
+                    &p, min_lines, min_tokens, threshold, block, &ignore,
+                )]
+            }),
+        ));
+    }
 
-    let script_gate_names: Vec<&'static str> = script_gates.iter().map(|g| g.name).collect();
-    let script_handle = if !script_gates.is_empty() {
+    if !script_gates.is_empty() {
+        let fallback: Vec<&'static str> = script_gates.iter().map(|g| g.name).collect();
         let dir = project_dir.to_path_buf();
-        Some(thread::spawn(move || {
-            tools::run_script_gates(&script_gates, &dir)
-        }))
-    } else {
-        None
-    };
-
-    let mut results: Vec<_> = handles
-        .into_iter()
-        .map(|(name, handle)| match handle.join() {
-            Ok(result) => result,
-            Err(e) => {
-                eprintln!("gates: {name} thread panicked: {e:?}");
-                tools::ToolResult::skipped(name)
-            }
-        })
-        .collect();
-
-    if let Some(h) = litmus_handle {
-        match h.join() {
-            Ok(result) => results.push(result),
-            Err(e) => {
-                eprintln!("gates: litmus thread panicked: {e:?}");
-                results.push(tools::ToolResult::skipped("litmus"));
-            }
-        }
+        tasks.push((
+            fallback,
+            thread::spawn(move || tools::run_script_gates(&script_gates, &dir)),
+        ));
     }
 
-    if let Some(h) = graph_handle {
-        match h.join() {
-            Ok(graph_results) => results.extend(graph_results),
-            Err(e) => {
-                eprintln!("gates: graph gates thread panicked: {e:?}");
-                if circular_enabled {
-                    results.push(tools::ToolResult::skipped("circular"));
-                }
-                if coupling_enabled {
-                    results.push(tools::ToolResult::skipped("coupling"));
-                }
-            }
-        }
+    if tasks.is_empty() {
+        return None;
     }
 
-    if let Some(h) = clone_handle {
-        match h.join() {
-            Ok(result) => results.push(result),
-            Err(e) => {
-                eprintln!("gates: clone thread panicked: {e:?}");
-                results.push(tools::ToolResult::skipped("clone"));
-            }
-        }
-    }
-
-    if let Some(h) = jscpd_handle {
-        match h.join() {
-            Ok(result) => results.push(result),
-            Err(e) => {
-                eprintln!("gates: jscpd thread panicked: {e:?}");
-                results.push(tools::ToolResult::skipped("jscpd"));
-            }
-        }
-    }
-
-    if let Some(handle) = script_handle {
-        match handle.join() {
-            Ok(script_results) => results.extend(script_results),
-            Err(e) => {
-                eprintln!("gates: script gates thread panicked: {e:?}");
-                for name in &script_gate_names {
-                    results.push(tools::ToolResult::skipped(name));
-                }
-            }
-        }
+    let mut results: Vec<tools::ToolResult> = Vec::new();
+    for task in tasks {
+        join_into(&mut results, task);
     }
 
     warn_missing_tools(&results, &project);
@@ -554,6 +514,24 @@ mod tests {
     use super::*;
     use std::fs;
     use test_utils::TempDir;
+
+    // A panicked gate thread degrades to one `skipped` result per fallback name
+    // (OUTCOME fail-open constraint) instead of unwinding through `join_into`.
+    // The multi-name case pins the graph gate's circular+coupling fallback, the
+    // data-driven mapping this refactor introduced.
+    #[test]
+    fn join_into_maps_panic_to_skipped_per_fallback_name() {
+        let mut results: Vec<tools::ToolResult> = Vec::new();
+        let task: GateTask = (
+            vec!["circular", "coupling"],
+            thread::spawn(|| panic!("gate thread blew up")),
+        );
+        join_into(&mut results, task);
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(tools::ToolResult::is_skipped));
+        assert_eq!(results[0].name, "circular");
+        assert_eq!(results[1].name, "coupling");
+    }
 
     fn setup_project(gates_json: &str, files: &[&str]) -> TempDir {
         let tmp = TempDir::new("main");
