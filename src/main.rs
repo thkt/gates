@@ -515,6 +515,24 @@ mod tests {
     use std::fs;
     use test_utils::TempDir;
 
+    // A panicked gate thread degrades to one `skipped` result per fallback name
+    // (OUTCOME fail-open constraint) instead of unwinding through `join_into`.
+    // The multi-name case pins the graph gate's circular+coupling fallback, the
+    // data-driven mapping this refactor introduced.
+    #[test]
+    fn join_into_maps_panic_to_skipped_per_fallback_name() {
+        let mut results: Vec<tools::ToolResult> = Vec::new();
+        let task: GateTask = (
+            vec!["circular", "coupling"],
+            thread::spawn(|| panic!("gate thread blew up")),
+        );
+        join_into(&mut results, task);
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(tools::ToolResult::is_skipped));
+        assert_eq!(results[0].name, "circular");
+        assert_eq!(results[1].name, "coupling");
+    }
+
     fn setup_project(gates_json: &str, files: &[&str]) -> TempDir {
         let tmp = TempDir::new("main");
         fs::create_dir_all(tmp.join(".git")).unwrap();
