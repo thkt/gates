@@ -1,10 +1,36 @@
 use crate::color;
 use crate::tools::ToolResult;
 
-// Match guardrails separator lengths (header + "Gates " = 50, footer = 50)
-pub(crate) const HEADER_SEPARATOR: &str = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-pub(crate) const FOOTER_SEPARATOR: &str = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+// Match guardrails separator lengths (header + "Gates " = 50, footer = 50).
+// Private: the BLOCKED skeleton (blocked_header/blocked_footer) is the only
+// cross-module surface, so the raw separators stay internal to reporter.
+const HEADER_SEPARATOR: &str = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+const FOOTER_SEPARATOR: &str = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
 const MAX_PREVIEW_LINES: usize = 3;
+
+/// The bold-red `Gates ━━━` header line opening a BLOCKED block. Owned here so
+/// the stderr summary and the AI-facing failure block (`main::format_failures`)
+/// render a byte-identical header from one source.
+pub(crate) fn blocked_header() -> String {
+    color::bold_red(&format!("Gates {HEADER_SEPARATOR}"))
+}
+
+/// The two-line BLOCKED footer: the separator line followed by the BLOCKED
+/// message. Owns the singular/plural branch and the exact wording so a wording
+/// or separator change lands in one place. Returned as a single `\n`-joined
+/// string; pushing it into a line vec and `join("\n")`-ing yields the same bytes
+/// as two separate pushes.
+pub(crate) fn blocked_footer(n_failures: usize) -> String {
+    format!(
+        "{}\n{}",
+        color::bold_red(FOOTER_SEPARATOR),
+        color::bold_red(&format!(
+            "BLOCKED: {} gate{} failed. Fix the source code and retry. Do not circumvent this check.",
+            n_failures,
+            if n_failures == 1 { "" } else { "s" }
+        ))
+    )
+}
 
 pub fn format_summary(results: &[ToolResult]) -> String {
     let ran: Vec<_> = results.iter().filter(|r| !r.is_skipped()).collect();
@@ -26,22 +52,14 @@ pub fn format_summary(results: &[ToolResult]) -> String {
         return lines.join("\n");
     }
 
-    let mut lines = vec![
-        String::new(),
-        color::bold_red(&format!("Gates {HEADER_SEPARATOR}")),
-    ];
+    let mut lines = vec![String::new(), blocked_header()];
 
     for f in &failures {
         lines.push(color::red(&format!("  \u{2717} {}", f.name)));
         push_preview(&mut lines, f.output(), color::red);
     }
 
-    lines.push(color::bold_red(FOOTER_SEPARATOR));
-    lines.push(color::bold_red(&format!(
-        "BLOCKED: {} gate{} failed. Fix the source code and retry. Do not circumvent this check.",
-        failures.len(),
-        if failures.len() == 1 { "" } else { "s" }
-    )));
+    lines.push(blocked_footer(failures.len()));
 
     append_advisories(&mut lines, &warnings);
 

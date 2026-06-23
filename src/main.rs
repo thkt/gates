@@ -54,11 +54,7 @@ fn should_show_hint(project_dir: &Path, config: &config::GatesConfig) -> bool {
 }
 
 fn format_failures(failures: &[&tools::ToolResult]) -> String {
-    let mut lines = vec![String::new()];
-    lines.push(color::bold_red(&format!(
-        "Gates {}",
-        reporter::HEADER_SEPARATOR
-    )));
+    let mut lines = vec![String::new(), reporter::blocked_header()];
 
     for (i, f) in failures.iter().enumerate() {
         if i > 0 {
@@ -85,12 +81,7 @@ fn format_failures(failures: &[&tools::ToolResult]) -> String {
         }
     }
 
-    lines.push(color::bold_red(reporter::FOOTER_SEPARATOR));
-    lines.push(color::bold_red(&format!(
-        "BLOCKED: {} gate{} failed. Fix the source code and retry. Do not circumvent this check.",
-        failures.len(),
-        if failures.len() == 1 { "" } else { "s" }
-    )));
+    lines.push(reporter::blocked_footer(failures.len()));
 
     lines.join("\n")
 }
@@ -549,16 +540,14 @@ mod tests {
     }
 
     fn expected_block(gate_lines: &[&str], count: usize) -> String {
-        let header = format!("Gates {}", reporter::HEADER_SEPARATOR);
-        let blocked = format!(
-            "BLOCKED: {} gate{} failed. Fix the source code and retry. Do not circumvent this check.",
-            count,
-            if count == 1 { "" } else { "s" }
-        );
+        // Reference the same skeleton the production path renders, stripped to
+        // match the strip_ansi'd actual. Pins format_failures to reporter's
+        // byte contract rather than re-declaring the wording here.
+        let header = color::strip_ansi(&reporter::blocked_header());
+        let footer = color::strip_ansi(&reporter::blocked_footer(count));
         let mut lines = vec!["", header.as_str()];
         lines.extend_from_slice(gate_lines);
-        lines.push(reporter::FOOTER_SEPARATOR);
-        lines.push(&blocked);
+        lines.push(&footer);
         lines.join("\n")
     }
 
