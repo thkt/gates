@@ -6,43 +6,20 @@ use std::path::Path;
 
 const TOOLS_CONFIG_FILE: &str = ".claude/tools.json";
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default)]
 pub enum ConfigSource {
+    #[default]
     Default,
     Explicit,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default)]
 pub struct GatesConfig {
     pub gates: Option<HashMap<String, bool>>,
-    pub coupling_ca_threshold: Option<usize>,
-    pub clone_min_nodes: Option<usize>,
-    pub clone_min_lines: Option<usize>,
-    pub clone_block_threshold: Option<usize>,
-    pub jscpd_min_lines: Option<usize>,
-    pub jscpd_min_tokens: Option<usize>,
-    pub jscpd_threshold: Option<f64>,
-    pub jscpd_block: Option<bool>,
-    pub jscpd_ignore: Option<Vec<String>>,
+    pub coupling: CouplingSection,
+    pub clone: CloneSection,
+    pub jscpd: JscpdSection,
     pub source: ConfigSource,
-}
-
-impl Default for GatesConfig {
-    fn default() -> Self {
-        Self {
-            gates: None,
-            coupling_ca_threshold: None,
-            clone_min_nodes: None,
-            clone_min_lines: None,
-            clone_block_threshold: None,
-            jscpd_min_lines: None,
-            jscpd_min_tokens: None,
-            jscpd_threshold: None,
-            jscpd_block: None,
-            jscpd_ignore: None,
-            source: ConfigSource::Default,
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -53,31 +30,31 @@ struct ToolsJson {
     jscpd: Option<JscpdSection>,
 }
 
-#[derive(Deserialize)]
-struct CouplingSection {
+#[derive(Deserialize, Default, Debug, PartialEq)]
+pub struct CouplingSection {
     #[serde(rename = "caThreshold")]
-    ca_threshold: Option<usize>,
+    pub ca_threshold: Option<usize>,
 }
 
-#[derive(Deserialize)]
-struct CloneSection {
+#[derive(Deserialize, Default, Debug, PartialEq)]
+pub struct CloneSection {
     #[serde(rename = "minNodes")]
-    min_nodes: Option<usize>,
+    pub min_nodes: Option<usize>,
     #[serde(rename = "minLines")]
-    min_lines: Option<usize>,
+    pub min_lines: Option<usize>,
     #[serde(rename = "blockThreshold")]
-    block_threshold: Option<usize>,
+    pub block_threshold: Option<usize>,
 }
 
-#[derive(Deserialize)]
-struct JscpdSection {
+#[derive(Deserialize, Default, Debug, PartialEq)]
+pub struct JscpdSection {
     #[serde(rename = "minLines")]
-    min_lines: Option<usize>,
+    pub min_lines: Option<usize>,
     #[serde(rename = "minTokens")]
-    min_tokens: Option<usize>,
-    threshold: Option<f64>,
-    block: Option<bool>,
-    ignore: Option<Vec<String>>,
+    pub min_tokens: Option<usize>,
+    pub threshold: Option<f64>,
+    pub block: Option<bool>,
+    pub ignore: Option<Vec<String>>,
 }
 
 impl GatesConfig {
@@ -105,27 +82,15 @@ impl GatesConfig {
                 return Self::default();
             }
         };
-        let coupling_ca_threshold = parsed.coupling.and_then(|c| c.ca_threshold);
-        let (clone_min_nodes, clone_min_lines, clone_block_threshold) =
-            parsed.clone.map_or((None, None, None), |c| {
-                (c.min_nodes, c.min_lines, c.block_threshold)
-            });
-        let (jscpd_min_lines, jscpd_min_tokens, jscpd_threshold, jscpd_block, jscpd_ignore) =
-            parsed.jscpd.map_or((None, None, None, None, None), |j| {
-                (j.min_lines, j.min_tokens, j.threshold, j.block, j.ignore)
-            });
+        let coupling = parsed.coupling.unwrap_or_default();
+        let clone = parsed.clone.unwrap_or_default();
+        let jscpd = parsed.jscpd.unwrap_or_default();
         let Some(gates_map) = parsed.gates else {
             return Self {
                 gates: None,
-                coupling_ca_threshold,
-                clone_min_nodes,
-                clone_min_lines,
-                clone_block_threshold,
-                jscpd_min_lines,
-                jscpd_min_tokens,
-                jscpd_threshold,
-                jscpd_block,
-                jscpd_ignore,
+                coupling,
+                clone,
+                jscpd,
                 source: ConfigSource::Explicit,
             };
         };
@@ -144,15 +109,9 @@ impl GatesConfig {
         }
         Self {
             gates: Some(gates),
-            coupling_ca_threshold,
-            clone_min_nodes,
-            clone_min_lines,
-            clone_block_threshold,
-            jscpd_min_lines,
-            jscpd_min_tokens,
-            jscpd_threshold,
-            jscpd_block,
-            jscpd_ignore,
+            coupling,
+            clone,
+            jscpd,
             source: ConfigSource::Explicit,
         }
     }
@@ -226,12 +185,12 @@ mod tests {
         assert!(!config.is_enabled("my-custom-gate"));
     }
 
-    // T-501: coupling.caThreshold is read into coupling_ca_threshold.
+    // T-501: coupling.caThreshold is read into coupling.ca_threshold.
     #[test]
     fn reads_coupling_ca_threshold() {
         let dir = setup_dir(Some(r#"{"coupling":{"caThreshold":20}}"#));
         let config = GatesConfig::load(&dir);
-        assert_eq!(config.coupling_ca_threshold, Some(20));
+        assert_eq!(config.coupling.ca_threshold, Some(20));
     }
 
     // T-502: absent coupling section yields no threshold.
@@ -239,7 +198,7 @@ mod tests {
     fn missing_coupling_section_yields_none() {
         let dir = setup_dir(Some(r#"{"gates":{"knip":true}}"#));
         let config = GatesConfig::load(&dir);
-        assert_eq!(config.coupling_ca_threshold, None);
+        assert_eq!(config.coupling.ca_threshold, None);
     }
 
     // T-503: disabling coupling via gates does not imply a threshold.
@@ -248,7 +207,7 @@ mod tests {
         let dir = setup_dir(Some(r#"{"gates":{"coupling":false}}"#));
         let config = GatesConfig::load(&dir);
         assert!(!config.is_enabled("coupling"));
-        assert_eq!(config.coupling_ca_threshold, None);
+        assert_eq!(config.coupling.ca_threshold, None);
     }
 
     // T-504: gates booleans and coupling threshold coexist without interference.
@@ -260,7 +219,7 @@ mod tests {
         let config = GatesConfig::load(&dir);
         assert!(config.is_enabled("knip"));
         assert!(config.is_enabled("coupling"));
-        assert_eq!(config.coupling_ca_threshold, Some(15));
+        assert_eq!(config.coupling.ca_threshold, Some(15));
     }
 
     #[test]
@@ -279,9 +238,9 @@ mod tests {
             r#"{"clone":{"minNodes":30,"minLines":8,"blockThreshold":5}}"#,
         ));
         let config = GatesConfig::load(&dir);
-        assert_eq!(config.clone_min_nodes, Some(30));
-        assert_eq!(config.clone_min_lines, Some(8));
-        assert_eq!(config.clone_block_threshold, Some(5));
+        assert_eq!(config.clone.min_nodes, Some(30));
+        assert_eq!(config.clone.min_lines, Some(8));
+        assert_eq!(config.clone.block_threshold, Some(5));
     }
 
     // T-512: absent clone section yields no overrides.
@@ -289,9 +248,9 @@ mod tests {
     fn missing_clone_section_yields_none() {
         let dir = setup_dir(Some(r#"{"gates":{"knip":true}}"#));
         let config = GatesConfig::load(&dir);
-        assert_eq!(config.clone_min_nodes, None);
-        assert_eq!(config.clone_min_lines, None);
-        assert_eq!(config.clone_block_threshold, None);
+        assert_eq!(config.clone.min_nodes, None);
+        assert_eq!(config.clone.min_lines, None);
+        assert_eq!(config.clone.block_threshold, None);
     }
 
     // T-513: a partial clone section leaves unspecified fields None.
@@ -299,9 +258,9 @@ mod tests {
     fn partial_clone_section() {
         let dir = setup_dir(Some(r#"{"clone":{"minNodes":40}}"#));
         let config = GatesConfig::load(&dir);
-        assert_eq!(config.clone_min_nodes, Some(40));
-        assert_eq!(config.clone_min_lines, None);
-        assert_eq!(config.clone_block_threshold, None);
+        assert_eq!(config.clone.min_nodes, Some(40));
+        assert_eq!(config.clone.min_lines, None);
+        assert_eq!(config.clone.block_threshold, None);
     }
 
     // T-621: a full jscpd section is read into every field.
@@ -311,11 +270,11 @@ mod tests {
             r#"{"jscpd":{"minLines":8,"minTokens":60,"threshold":15,"block":true,"ignore":["x"]}}"#,
         ));
         let config = GatesConfig::load(&dir);
-        assert_eq!(config.jscpd_min_lines, Some(8));
-        assert_eq!(config.jscpd_min_tokens, Some(60));
-        assert_eq!(config.jscpd_threshold, Some(15.0));
-        assert_eq!(config.jscpd_block, Some(true));
-        assert_eq!(config.jscpd_ignore, Some(vec!["x".to_owned()]));
+        assert_eq!(config.jscpd.min_lines, Some(8));
+        assert_eq!(config.jscpd.min_tokens, Some(60));
+        assert_eq!(config.jscpd.threshold, Some(15.0));
+        assert_eq!(config.jscpd.block, Some(true));
+        assert_eq!(config.jscpd.ignore, Some(vec!["x".to_owned()]));
     }
 
     // T-622: absent jscpd section yields no overrides.
@@ -323,11 +282,11 @@ mod tests {
     fn missing_jscpd_section_yields_none() {
         let dir = setup_dir(Some(r#"{"gates":{"knip":true}}"#));
         let config = GatesConfig::load(&dir);
-        assert_eq!(config.jscpd_min_lines, None);
-        assert_eq!(config.jscpd_min_tokens, None);
-        assert_eq!(config.jscpd_threshold, None);
-        assert_eq!(config.jscpd_block, None);
-        assert_eq!(config.jscpd_ignore, None);
+        assert_eq!(config.jscpd.min_lines, None);
+        assert_eq!(config.jscpd.min_tokens, None);
+        assert_eq!(config.jscpd.threshold, None);
+        assert_eq!(config.jscpd.block, None);
+        assert_eq!(config.jscpd.ignore, None);
     }
 
     // T-623: a partial jscpd section leaves unspecified fields None.
@@ -335,10 +294,10 @@ mod tests {
     fn partial_jscpd_section() {
         let dir = setup_dir(Some(r#"{"jscpd":{"minLines":8}}"#));
         let config = GatesConfig::load(&dir);
-        assert_eq!(config.jscpd_min_lines, Some(8));
-        assert_eq!(config.jscpd_min_tokens, None);
-        assert_eq!(config.jscpd_threshold, None);
-        assert_eq!(config.jscpd_block, None);
-        assert_eq!(config.jscpd_ignore, None);
+        assert_eq!(config.jscpd.min_lines, Some(8));
+        assert_eq!(config.jscpd.min_tokens, None);
+        assert_eq!(config.jscpd.threshold, None);
+        assert_eq!(config.jscpd.block, None);
+        assert_eq!(config.jscpd.ignore, None);
     }
 }

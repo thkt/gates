@@ -187,7 +187,7 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
 
     if circular_enabled || coupling_enabled {
         let p = project.clone();
-        let ca_threshold = config.coupling_ca_threshold;
+        let ca_threshold = config.coupling.ca_threshold;
         let mut fallback = Vec::new();
         if circular_enabled {
             fallback.push("circular");
@@ -205,10 +205,11 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
 
     if config.is_enabled("clone") {
         let p = project.clone();
-        let min_nodes = config.clone_min_nodes.unwrap_or(clone::DEFAULT_MIN_NODES);
-        let min_lines = config.clone_min_lines.unwrap_or(clone::DEFAULT_MIN_LINES);
+        let min_nodes = config.clone.min_nodes.unwrap_or(clone::DEFAULT_MIN_NODES);
+        let min_lines = config.clone.min_lines.unwrap_or(clone::DEFAULT_MIN_LINES);
         let block_threshold = config
-            .clone_block_threshold
+            .clone
+            .block_threshold
             .unwrap_or(clone::DEFAULT_BLOCK_THRESHOLD);
         tasks.push((
             vec!["clone"],
@@ -221,16 +222,19 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
     if config.is_enabled("jscpd") {
         let p = project.clone();
         let min_lines = config
-            .jscpd_min_lines
+            .jscpd
+            .min_lines
             .unwrap_or(tools::DEFAULT_JSCPD_MIN_LINES);
         let min_tokens = config
-            .jscpd_min_tokens
+            .jscpd
+            .min_tokens
             .unwrap_or(tools::DEFAULT_JSCPD_MIN_TOKENS);
         let threshold = config
-            .jscpd_threshold
+            .jscpd
+            .threshold
             .unwrap_or(tools::DEFAULT_JSCPD_THRESHOLD);
-        let block = config.jscpd_block.unwrap_or(false);
-        let ignore = config.jscpd_ignore.clone().unwrap_or_else(|| {
+        let block = config.jscpd.block.unwrap_or(false);
+        let ignore = config.jscpd.ignore.clone().unwrap_or_else(|| {
             tools::DEFAULT_JSCPD_IGNORE
                 .iter()
                 .map(|s| (*s).to_owned())
