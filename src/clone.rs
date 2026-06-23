@@ -15,7 +15,7 @@ pub const DEFAULT_MIN_LINES: usize = 5;
 /// Default number of clone groups that triggers a block (DRY rule of three).
 pub const DEFAULT_BLOCK_THRESHOLD: usize = 3;
 
-/// ESTree node types whose identifier/literal *content* is normalized away when
+/// `ESTree` node types whose identifier/literal *content* is normalized away when
 /// computing the Type 2 (structural) key, so renamed identifiers and differing
 /// literals hash equal. Gated by node type — not key name — so structural fields
 /// that merely share a name (e.g. `Property.value`) are never blanked.
@@ -39,7 +39,7 @@ pub struct CloneInstance {
 
 /// A set of structurally identical subtrees occurring in 2+ locations.
 pub struct CloneGroup {
-    /// Occurrences, sorted by (path, start_line). Length >= 2.
+    /// Occurrences, sorted by (path, `start_line`). Length >= 2.
     pub instances: Vec<CloneInstance>,
     /// AST node count of the duplicated subtree.
     pub node_count: usize,
@@ -50,7 +50,7 @@ pub struct CloneGroup {
 }
 
 pub struct CloneResult {
-    /// Clone groups, sorted by node_count descending then first path ascending.
+    /// Clone groups, sorted by `node_count` descending then first path ascending.
     pub groups: Vec<CloneGroup>,
 }
 
@@ -66,7 +66,7 @@ struct Candidate {
     end_line: usize,
 }
 
-/// Canonical string pair plus node count produced for a serde_json value.
+/// Canonical string pair plus node count produced for a `serde_json` value.
 struct Rendered {
     named: String,
     blank: String,

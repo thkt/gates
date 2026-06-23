@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 
 fn is_executable(path: &Path) -> bool {
     path.metadata()
-        .map(|m| m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+        .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
 }
 
 pub fn resolve_bin(name: &str, start: &Path) -> PathBuf {

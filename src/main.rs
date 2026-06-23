@@ -116,7 +116,7 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
     let config = config::GatesConfig::load(project_dir);
 
     if should_show_hint(project_dir, &config) {
-        eprintln!("{}", CONFIG_HINT);
+        eprintln!("{CONFIG_HINT}");
     }
 
     let project = project::ProjectInfo::detect(project_dir);
@@ -241,7 +241,7 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
         .map(|(name, handle)| match handle.join() {
             Ok(result) => result,
             Err(e) => {
-                eprintln!("gates: {} thread panicked: {:?}", name, e);
+                eprintln!("gates: {name} thread panicked: {e:?}");
                 tools::ToolResult::skipped(name)
             }
         })
@@ -296,7 +296,7 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
         match handle.join() {
             Ok(script_results) => results.extend(script_results),
             Err(e) => {
-                eprintln!("gates: script gates thread panicked: {:?}", e);
+                eprintln!("gates: script gates thread panicked: {e:?}");
                 for name in &script_gate_names {
                     results.push(tools::ToolResult::skipped(name));
                 }
@@ -442,7 +442,7 @@ fn format_show_output(entries: &[audit::AuditEntry], json: bool) -> Option<Strin
 
 /// Write one line to stdout, returning an exit code. A closed downstream pipe
 /// (`gates show | head`) exits 0 instead of panicking the way `println!` does;
-/// any other write error maps to EX_IOERR.
+/// any other write error maps to `EX_IOERR`.
 fn write_stdout(s: &str) -> i32 {
     match writeln!(io::stdout(), "{s}") {
         Ok(()) => 0,
@@ -485,7 +485,7 @@ fn main() {
     // `gates post-bash [dir]`: PostToolUse Bash trigger (issue #17). Runs gates
     // only when the fileset changed since the last run; otherwise fast-exits.
     if args.get(1).map(String::as_str) == Some("post-bash") {
-        let dir = args.get(2).map(String::as_str).unwrap_or(".");
+        let dir = args.get(2).map_or(".", String::as_str);
         let project_dir = Path::new(dir);
         if !project_dir.is_dir() {
             eprintln!("gates: not a directory: {}", project_dir.display());
@@ -502,7 +502,7 @@ fn main() {
         process::exit(ex_usage());
     }
 
-    let dir = args.get(1).map(String::as_str).unwrap_or(".");
+    let dir = args.get(1).map_or(".", String::as_str);
     let project_dir = Path::new(dir);
     if !project_dir.is_dir() {
         eprintln!("gates: not a directory: {}", project_dir.display());
@@ -514,7 +514,7 @@ fn main() {
     }
 }
 
-/// PostToolUse Bash entry (issue #17): run gates only when the gated fileset
+/// `PostToolUse` Bash entry (issue #17): run gates only when the gated fileset
 /// changed since the last recorded snapshot. A matching stored digest means no
 /// gated file changed, so the gates are skipped (fast-exit). A missing snapshot
 /// dir, a missing/corrupt stored digest, or a mismatch all fall through to a full
