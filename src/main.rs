@@ -9,6 +9,7 @@ mod hook_exit;
 mod project;
 mod reporter;
 mod resolve;
+mod runner;
 mod sanitize;
 mod snapshot;
 #[cfg(test)]
@@ -53,7 +54,7 @@ fn should_show_hint(project_dir: &Path, config: &config::GatesConfig) -> bool {
     project_dir.join(".claude").is_dir()
 }
 
-fn format_failures(failures: &[&tools::ToolResult]) -> String {
+fn format_failures(failures: &[&runner::ToolResult]) -> String {
     let mut lines = vec![String::new(), reporter::blocked_header()];
 
     for (i, f) in failures.iter().enumerate() {
@@ -109,18 +110,18 @@ fn record_snapshot(project_root: &Path, overrides: &tools::EnvOverrides) {
 /// `skipped` if the thread panics.
 type GateTask = (
     Vec<&'static str>,
-    thread::JoinHandle<Vec<tools::ToolResult>>,
+    thread::JoinHandle<Vec<runner::ToolResult>>,
 );
 
 /// Join one gate thread into `results`. Owns the panic→`skipped` mapping in one
 /// place: a panicked gate degrades to a `skipped` result per fallback name
 /// rather than aborting the hook (OUTCOME fail-open constraint).
-fn join_into(results: &mut Vec<tools::ToolResult>, (fallback, handle): GateTask) {
+fn join_into(results: &mut Vec<runner::ToolResult>, (fallback, handle): GateTask) {
     match handle.join() {
         Ok(gate_results) => results.extend(gate_results),
         Err(e) => {
             eprintln!("gates: {} thread panicked: {e:?}", fallback.join("+"));
-            results.extend(fallback.into_iter().map(tools::ToolResult::skipped));
+            results.extend(fallback.into_iter().map(runner::ToolResult::skipped));
         }
     }
 }
@@ -254,7 +255,7 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
         return None;
     }
 
-    let mut results: Vec<tools::ToolResult> = Vec::new();
+    let mut results: Vec<runner::ToolResult> = Vec::new();
     for task in tasks {
         join_into(&mut results, task);
     }
@@ -300,7 +301,7 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
 /// reported to stderr but never propagated into the hook control flow.
 fn record_audit(
     project_dir: &Path,
-    failures: &[&tools::ToolResult],
+    failures: &[&runner::ToolResult],
     overrides: &tools::EnvOverrides,
 ) {
     let Some(dir) = overrides.audit_dir.as_deref() else {
@@ -320,7 +321,7 @@ fn record_audit(
     }
 }
 
-fn warn_missing_tools(results: &[tools::ToolResult], project: &project::ProjectInfo) {
+fn warn_missing_tools(results: &[runner::ToolResult], project: &project::ProjectInfo) {
     for gate in tools::GATES {
         if !(gate.condition)(project) {
             continue;
@@ -516,14 +517,14 @@ mod tests {
     // data-driven mapping this refactor introduced.
     #[test]
     fn join_into_maps_panic_to_skipped_per_fallback_name() {
-        let mut results: Vec<tools::ToolResult> = Vec::new();
+        let mut results: Vec<runner::ToolResult> = Vec::new();
         let task: GateTask = (
             vec!["circular", "coupling"],
             thread::spawn(|| panic!("gate thread blew up")),
         );
         join_into(&mut results, task);
         assert_eq!(results.len(), 2);
-        assert!(results.iter().all(tools::ToolResult::is_skipped));
+        assert!(results.iter().all(runner::ToolResult::is_skipped));
         assert_eq!(results[0].name, "circular");
         assert_eq!(results[1].name, "coupling");
     }
@@ -760,10 +761,10 @@ mod tests {
 
     #[test]
     fn format_single_failure_with_output() {
-        let r = tools::ToolResult {
+        let r = runner::ToolResult {
             name: "knip",
             hint: "Remove unused exports and dependencies.",
-            outcome: tools::GateOutcome::Failed("Unused export: src/foo.ts".into()),
+            outcome: runner::GateOutcome::Failed("Unused export: src/foo.ts".into()),
         };
         let result = color::strip_ansi(&format_failures(&[&r]));
         assert_eq!(
@@ -782,10 +783,10 @@ mod tests {
 
     #[test]
     fn format_single_failure_without_output() {
-        let r = tools::ToolResult {
+        let r = runner::ToolResult {
             name: "knip",
             hint: "Remove unused exports and dependencies.",
-            outcome: tools::GateOutcome::Failed(String::new()),
+            outcome: runner::GateOutcome::Failed(String::new()),
         };
         let result = color::strip_ansi(&format_failures(&[&r]));
         assert_eq!(
@@ -802,10 +803,10 @@ mod tests {
 
     #[test]
     fn format_single_failure_fallback_hint() {
-        let r = tools::ToolResult {
+        let r = runner::ToolResult {
             name: "custom",
             hint: "",
-            outcome: tools::GateOutcome::Failed("error output".into()),
+            outcome: runner::GateOutcome::Failed("error output".into()),
         };
         let result = color::strip_ansi(&format_failures(&[&r]));
         assert_eq!(
@@ -824,15 +825,15 @@ mod tests {
 
     #[test]
     fn format_multiple_failures() {
-        let r1 = tools::ToolResult {
+        let r1 = runner::ToolResult {
             name: "knip",
             hint: "Remove unused exports and dependencies.",
-            outcome: tools::GateOutcome::Failed("Unused export".into()),
+            outcome: runner::GateOutcome::Failed("Unused export".into()),
         };
-        let r2 = tools::ToolResult {
+        let r2 = runner::ToolResult {
             name: "tsgo",
             hint: "Fix type errors.",
-            outcome: tools::GateOutcome::Failed("TS2345: type error".into()),
+            outcome: runner::GateOutcome::Failed("TS2345: type error".into()),
         };
         let result = color::strip_ansi(&format_failures(&[&r1, &r2]));
         assert_eq!(
@@ -856,15 +857,15 @@ mod tests {
 
     #[test]
     fn format_multiple_failures_without_output() {
-        let r1 = tools::ToolResult {
+        let r1 = runner::ToolResult {
             name: "knip",
             hint: "Remove unused exports and dependencies.",
-            outcome: tools::GateOutcome::Failed(String::new()),
+            outcome: runner::GateOutcome::Failed(String::new()),
         };
-        let r2 = tools::ToolResult {
+        let r2 = runner::ToolResult {
             name: "tsgo",
             hint: "Fix type errors.",
-            outcome: tools::GateOutcome::Failed(String::new()),
+            outcome: runner::GateOutcome::Failed(String::new()),
         };
         let result = color::strip_ansi(&format_failures(&[&r1, &r2]));
         assert_eq!(
@@ -884,15 +885,15 @@ mod tests {
 
     #[test]
     fn format_multiple_failures_mixed_hints() {
-        let r1 = tools::ToolResult {
+        let r1 = runner::ToolResult {
             name: "custom",
             hint: "",
-            outcome: tools::GateOutcome::Failed("error".into()),
+            outcome: runner::GateOutcome::Failed("error".into()),
         };
-        let r2 = tools::ToolResult {
+        let r2 = runner::ToolResult {
             name: "knip",
             hint: "Remove unused exports and dependencies.",
-            outcome: tools::GateOutcome::Failed("Unused export".into()),
+            outcome: runner::GateOutcome::Failed("Unused export".into()),
         };
         let result = color::strip_ansi(&format_failures(&[&r1, &r2]));
         assert_eq!(
