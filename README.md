@@ -147,7 +147,7 @@ Add to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "gates post-bash",
+            "command": "gates changed",
             "timeout": 70000
           }
         ]
@@ -159,7 +159,9 @@ Add to `~/.claude/settings.json`:
 
 When registered as a PostToolUse hook, `gates` runs after each file write/edit and provides failure feedback to the agent.
 
-The `Bash` matcher catches edits made through the shell (`sed -i`, `cat >`, heredocs, `tee`, `tar x`, `cp -p`, `git checkout`, build scripts) that the `Write|Edit|MultiEdit` matcher misses. `gates post-bash` compares the current gated fileset against a stored digest and runs the gates only when a gated source or config file actually changed; an unchanged fileset fast-exits in a few milliseconds, so it adds negligible overhead to ordinary shell commands.
+The `Bash` matcher catches edits made through the shell (`sed -i`, `cat >`, heredocs, `tee`, `tar x`, `cp -p`, `git checkout`, build scripts) that the `Write|Edit|MultiEdit` matcher misses. `gates changed` compares the current gated fileset against a stored digest and runs the gates only when a gated source or config file actually changed; an unchanged fileset fast-exits in a few milliseconds, so it adds negligible overhead to ordinary shell commands.
+
+> This subcommand was renamed from `gates post-bash`. There is no backward-compat alias, so a stale config prints `gates: not a directory: post-bash` and exits 64 (non-blocking on the PostToolUse path). Update `gates post-bash` to `gates changed` in `~/.claude/settings.json`.
 
 ### Direct Execution
 

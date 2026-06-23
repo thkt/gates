@@ -312,11 +312,11 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
     }
 
     // Record the post-gate fileset digest so a following Bash-triggered
-    // `gates post-bash` does not re-detect this same edit (FR-006 double-detection
+    // `gates changed` does not re-detect this same edit (FR-006 double-detection
     // guard). Recording here, after the gates have run, captures the actual
     // on-disk state: a gate that writes a target file (e.g. a project type-check
     // script emitting `.js`) is reflected in the stored digest, so the next
-    // unchanged `post-bash` still fast-exits instead of re-triggering forever.
+    // unchanged `gates changed` still fast-exits instead of re-triggering forever.
     // Write failures degrade to stderr only (fail-open, never block).
     record_snapshot(&project.root, overrides);
 
@@ -477,49 +477,66 @@ fn run_show(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    process::exit(dispatch(&args));
+}
 
-    if args.get(1).map(String::as_str) == Some("show") {
-        process::exit(run_show(&args[2..]));
+/// Route argv to a subcommand and return the process exit code. Extracted from
+/// `main` so every routing arm is unit-testable without `process::exit`; `main`
+/// is the only caller that turns this code into an actual exit. The two execution
+/// modes are intentionally asymmetric (see `run_changed` and `dispatch_default`).
+fn dispatch(args: &[String]) -> i32 {
+    match args.get(1).map(String::as_str) {
+        Some("show") => run_show(&args[2..]),
+        Some("changed") => dispatch_changed(args.get(2).map_or(".", String::as_str)),
+        _ => dispatch_default(args),
     }
+}
 
-    // `gates post-bash [dir]`: PostToolUse Bash trigger (issue #17). Runs gates
-    // only when the fileset changed since the last run; otherwise fast-exits.
-    if args.get(1).map(String::as_str) == Some("post-bash") {
-        let dir = args.get(2).map_or(".", String::as_str);
-        let project_dir = Path::new(dir);
-        if !project_dir.is_dir() {
-            eprintln!("gates: not a directory: {}", project_dir.display());
-            process::exit(ex_usage());
-        }
-        if let Some(json) = run_post_bash(project_dir, &tools::EnvOverrides::from_env()) {
-            println!("{json}");
-        }
-        return;
+/// `gates changed [dir]`: PostToolUse Bash trigger (issue #17). Delta-gated: runs
+/// gates only when the fileset changed since the last recorded snapshot, else
+/// fast-exits. Asymmetric with the default mode by design (the Bash matcher fires
+/// on every shell command, so most invocations have no change to gate).
+fn dispatch_changed(dir: &str) -> i32 {
+    let project_dir = Path::new(dir);
+    if !project_dir.is_dir() {
+        eprintln!("gates: not a directory: {}", project_dir.display());
+        return ex_usage();
     }
+    if let Some(json) = run_changed(project_dir, &tools::EnvOverrides::from_env()) {
+        println!("{json}");
+    }
+    0
+}
 
+/// `gates [dir]`: default Write/Edit/MultiEdit trigger. Always runs the gates (no
+/// delta gate): those matchers fire only when a tool wrote a file, so a change is
+/// implied. The run still records a post-gate snapshot that seeds the `changed`
+/// mode's double-detection guard (FR-006), which is why the asymmetry is
+/// load-bearing rather than incidental.
+fn dispatch_default(args: &[String]) -> i32 {
     if args.len() > 2 {
         eprintln!("usage: gates [project_dir]");
-        process::exit(ex_usage());
+        return ex_usage();
     }
-
     let dir = args.get(1).map_or(".", String::as_str);
     let project_dir = Path::new(dir);
     if !project_dir.is_dir() {
         eprintln!("gates: not a directory: {}", project_dir.display());
-        process::exit(ex_usage());
+        return ex_usage();
     }
-
     if let Some(json) = run(project_dir) {
         println!("{json}");
     }
+    0
 }
 
-/// `PostToolUse` Bash entry (issue #17): run gates only when the gated fileset
-/// changed since the last recorded snapshot. A matching stored digest means no
-/// gated file changed, so the gates are skipped (fast-exit). A missing snapshot
-/// dir, a missing/corrupt stored digest, or a mismatch all fall through to a full
-/// run (fail-open = run rather than skip). The run records the fresh digest.
-fn run_post_bash(project_dir: &Path, overrides: &tools::EnvOverrides) -> Option<String> {
+/// `PostToolUse` Bash entry (issue #17), invoked as `gates changed`: run gates
+/// only when the gated fileset changed since the last recorded snapshot. A
+/// matching stored digest means no gated file changed, so the gates are skipped
+/// (fast-exit). A missing snapshot dir, a missing/corrupt stored digest, or a
+/// mismatch all fall through to a full run (fail-open = run rather than skip). The
+/// run records the fresh digest.
+fn run_changed(project_dir: &Path, overrides: &tools::EnvOverrides) -> Option<String> {
     let project = project::ProjectInfo::detect(project_dir);
     if let Some(dir) = overrides.snapshot_dir.as_deref() {
         let current = snapshot::compute_digest(&project.root);
@@ -563,10 +580,10 @@ mod tests {
         lines.join("\n")
     }
 
-    // --- issue #17 `gates post-bash` integration tests (M2) ---
+    // --- issue #17 `gates changed` integration tests (M2) ---
 
     // Project with a single failing gate (knip exits 1). Used to make a run
-    // observable: if the gate runs, run_post_bash returns Some(block JSON); if
+    // observable: if the gate runs, run_changed returns Some(block JSON); if
     // the digest matches and the run is skipped, it returns None.
     fn setup_failing_knip() -> TempDir {
         let tmp = setup_project(r#"{"gates":{"knip":true}}"#, &["package.json"]);
@@ -577,13 +594,13 @@ mod tests {
     // T-014: a stored digest matching the current fileset skips the run entirely
     // (fast-exit), so the failing gate never fires and the result is None.
     #[test]
-    fn post_bash_skips_when_unchanged_t014() {
+    fn changed_skips_when_unchanged_t014() {
         let tmp = setup_failing_knip();
         let snap_dir = tmp.join("snap");
         let root = project::ProjectInfo::detect(&tmp).root;
         snapshot::write(&snap_dir, &root, &snapshot::compute_digest(&root)).unwrap();
 
-        let result = run_post_bash(
+        let result = run_changed(
             &tmp,
             &tools::EnvOverrides {
                 snapshot_dir: Some(snap_dir),
@@ -597,7 +614,7 @@ mod tests {
     // T-015: a fileset change after the baseline digest was stored makes the run
     // fire (block JSON), and the snapshot is refreshed to the post-run digest.
     #[test]
-    fn post_bash_runs_and_updates_digest_when_changed_t015() {
+    fn changed_runs_and_updates_digest_when_changed_t015() {
         let tmp = setup_failing_knip();
         fs::write(tmp.join("a.ts"), "const x = 1;").unwrap();
         let snap_dir = tmp.join("snap");
@@ -605,7 +622,7 @@ mod tests {
         snapshot::write(&snap_dir, &root, &snapshot::compute_digest(&root)).unwrap();
 
         fs::write(tmp.join("a.ts"), "const x = 1; const y = 2;").unwrap();
-        let result = run_post_bash(
+        let result = run_changed(
             &tmp,
             &tools::EnvOverrides {
                 snapshot_dir: Some(snap_dir.clone()),
@@ -621,9 +638,9 @@ mod tests {
     // T-016: with every gate disabled (empty gates map) the run is a no-op and
     // returns None (exit 0). FR-005 step 1 reduces to "no block".
     #[test]
-    fn post_bash_no_op_when_no_enabled_gates_t016() {
+    fn changed_no_op_when_no_enabled_gates_t016() {
         let tmp = setup_project(r#"{"gates":{}}"#, &["package.json"]);
-        let result = run_post_bash(
+        let result = run_changed(
             &tmp,
             &tools::EnvOverrides {
                 snapshot_dir: Some(tmp.join("snap")),
@@ -634,11 +651,11 @@ mod tests {
     }
 
     // T-017: a first run (no stored baseline) with a failing gate emits the
-    // block JSON to stdout (returned by run_post_bash).
+    // block JSON to stdout (returned by run_changed).
     #[test]
-    fn post_bash_emits_block_json_on_failure_t017() {
+    fn changed_emits_block_json_on_failure_t017() {
         let tmp = setup_failing_knip();
-        let result = run_post_bash(
+        let result = run_changed(
             &tmp,
             &tools::EnvOverrides {
                 snapshot_dir: Some(tmp.join("snap")),
@@ -686,7 +703,7 @@ mod tests {
     // no-change run skips, and a `sed -i`-style source edit makes the next run
     // fire again.
     #[test]
-    fn post_bash_fires_after_sed_edit_t021() {
+    fn changed_fires_after_sed_edit_t021() {
         let tmp = setup_failing_knip();
         fs::write(tmp.join("a.ts"), "const x = 1;").unwrap();
         let overrides = tools::EnvOverrides {
@@ -695,11 +712,11 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(run_post_bash(&tmp, &overrides).is_some());
-        assert!(run_post_bash(&tmp, &overrides).is_none());
+        assert!(run_changed(&tmp, &overrides).is_some());
+        assert!(run_changed(&tmp, &overrides).is_none());
 
         fs::write(tmp.join("a.ts"), "const x = 1; // edited").unwrap();
-        assert!(run_post_bash(&tmp, &overrides).is_some());
+        assert!(run_changed(&tmp, &overrides).is_some());
     }
 
     // A gate that writes a target file (here a fake knip that emits `out.js`)
@@ -714,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn post_bash_does_not_retrigger_after_gate_emits_target_file_t023() {
+    fn changed_does_not_retrigger_after_gate_emits_target_file_t023() {
         let tmp = setup_emitting_knip();
         let overrides = tools::EnvOverrides {
             snapshot_dir: Some(tmp.join("snap")),
@@ -723,9 +740,51 @@ mod tests {
         };
 
         // First run: no baseline, gate runs and emits out.js, returns block.
-        assert!(run_post_bash(&tmp, &overrides).is_some());
+        assert!(run_changed(&tmp, &overrides).is_some());
         // The emitted file is part of the recorded digest, so a no-change run skips.
-        assert!(run_post_bash(&tmp, &overrides).is_none());
+        assert!(run_changed(&tmp, &overrides).is_none());
+    }
+
+    // --- #55 dispatch routing tests ---
+    // dispatch() is the extracted, exit-free router. These assert the exit code
+    // of every error arm without starting the gates, so they stay hermetic (each
+    // arm returns before any gate runs).
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    // T-001: `gates show --bogus` routes to run_show and surfaces its usage error.
+    #[test]
+    fn dispatch_routes_show_usage_error_t001() {
+        assert_eq!(dispatch(&argv(&["gates", "show", "--bogus"])), 64);
+    }
+
+    // T-002: `gates changed <missing-dir>` routes to the changed arm and rejects a
+    // non-directory with EX_USAGE before running gates.
+    #[test]
+    fn dispatch_changed_rejects_missing_dir_t002() {
+        assert_eq!(dispatch(&argv(&["gates", "changed", "/no/such/dir"])), 64);
+    }
+
+    // T-003: `gates <missing-dir>` routes to the default arm and rejects a
+    // non-directory with EX_USAGE.
+    #[test]
+    fn dispatch_default_rejects_missing_dir_t003() {
+        assert_eq!(dispatch(&argv(&["gates", "/no/such/dir"])), 64);
+    }
+
+    // T-004: the default arm rejects more than one positional argument.
+    #[test]
+    fn dispatch_default_rejects_too_many_args_t004() {
+        assert_eq!(dispatch(&argv(&["gates", "a", "b", "c"])), 64);
+    }
+
+    // T-005: with no backward-compat alias, the old `gates post-bash` falls through
+    // to the default arm and is treated as a directory path, exiting 64.
+    #[test]
+    fn dispatch_has_no_post_bash_alias_t005() {
+        assert_eq!(dispatch(&argv(&["gates", "post-bash"])), 64);
     }
 
     #[test]

@@ -145,7 +145,7 @@ cd .. && rm -rf gates
         "hooks": [
           {
             "type": "command",
-            "command": "gates post-bash",
+            "command": "gates changed",
             "timeout": 70000
           }
         ]
@@ -157,7 +157,9 @@ cd .. && rm -rf gates
 
 PostToolUseフックとして登録すると、`gates` はファイルの書き込み・編集のたびに実行され、失敗時にエージェントへフィードバックを返します。
 
-`Bash` マッチャーは、`Write|Edit|MultiEdit` マッチャーが取りこぼすシェル経由の編集 (`sed -i`、`cat >`、ヒアドキュメント、`tee`、`tar x`、`cp -p`、`git checkout`、ビルドスクリプト) を捕捉します。`gates post-bash` は現在のゲート対象ファイルセットを保存済みダイジェストと比較し、ゲート対象のソースまたは設定ファイルが実際に変化したときだけゲートを実行します。変化のないファイルセットは数ミリ秒で抜けるため、通常のシェルコマンドへのオーバーヘッドはごくわずかです。
+`Bash` マッチャーは、`Write|Edit|MultiEdit` マッチャーが取りこぼすシェル経由の編集 (`sed -i`、`cat >`、ヒアドキュメント、`tee`、`tar x`、`cp -p`、`git checkout`、ビルドスクリプト) を捕捉します。`gates changed` は現在のゲート対象ファイルセットを保存済みダイジェストと比較し、ゲート対象のソースまたは設定ファイルが実際に変化したときだけゲートを実行します。変化のないファイルセットは数ミリ秒で抜けるため、通常のシェルコマンドへのオーバーヘッドはごくわずかです。
+
+> このサブコマンドは旧称 `gates post-bash` からの改名です。後方互換エイリアスはないため、旧設定のままだと `gates: not a directory: post-bash` を出力して exit 64 になります (PostToolUse 経路では非ブロッキング)。`~/.claude/settings.json` の `gates post-bash` を `gates changed` へ更新してください。
 
 ### 直接実行
 
