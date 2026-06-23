@@ -137,8 +137,7 @@ impl GatesConfig {
                 }
                 None => {
                     eprintln!(
-                        "gates: ignoring non-boolean value for gate '{}' in {}",
-                        k, TOOLS_CONFIG_FILE
+                        "gates: ignoring non-boolean value for gate '{k}' in {TOOLS_CONFIG_FILE}"
                     );
                 }
             }

@@ -1,5 +1,5 @@
 //! Process exit codes per ADR-0066 Group 3 (Hook tool) convention, shared with
-//! the role-pair `guardrails` (PreToolUse). gates is the PostToolUse half, so
+//! the role-pair `guardrails` (`PreToolUse`). gates is the `PostToolUse` half, so
 //! its decision surface differs: a blocking decision is emitted as stdout
 //! `{"decision":"block"}` + exit 0 (the OUTCOME constraint and issue #18), not
 //! as a real exit 2. This enum encodes the Group 3 semantics at the type level

@@ -1,4 +1,4 @@
-//! Filesystem-delta snapshot for the PostToolUse Bash trigger (issue #17).
+//! Filesystem-delta snapshot for the `PostToolUse` Bash trigger (issue #17).
 //!
 //! Computes a ctime+size digest over the target fileset (FR-001), and reads /
 //! writes the per-project digest state file fail-open (FR-002..FR-004). Bash
@@ -68,7 +68,7 @@ fn collect_targets(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        let is_dir = entry.file_type().is_ok_and(|ft| ft.is_dir());
         if is_dir {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if !EXCLUDED_DIRS.contains(&name) {

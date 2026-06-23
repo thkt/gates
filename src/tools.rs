@@ -901,7 +901,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Mutex, PoisonError};
 
-    /// run_jscpd derives its temp output dir from the process PID, so the three
+    /// `run_jscpd` derives its temp output dir from the process PID, so the three
     /// end-to-end tests below share one dir. Serialize them so one test's report
     /// is never read (or wiped) by another running concurrently.
     static JSCPD_RUN_LOCK: Mutex<()> = Mutex::new(());
@@ -1459,7 +1459,7 @@ mod tests {
         fs::create_dir_all(tmp.join("src")).unwrap();
         fs::write(
             tmp.join("src/example.test.ts"),
-            r#"
+            r"
 import { describe, test, expect } from 'vitest';
 describe('math', () => {
     test('adds two numbers correctly', () => {
@@ -1467,7 +1467,7 @@ describe('math', () => {
         expect(result).toBe(3);
     });
 });
-"#,
+",
         )
         .unwrap();
         let project = ProjectInfo {
@@ -1489,12 +1489,12 @@ describe('math', () => {
         fs::write(tmp.join("package.json"), "{}").unwrap();
         fs::write(
             tmp.join("bad.test.ts"),
-            r#"
+            r"
 import { test, expect } from 'vitest';
 test('works', () => {
     expect(true).toBe(true);
 });
-"#,
+",
         )
         .unwrap();
         let project = ProjectInfo {
