@@ -570,12 +570,7 @@ mod tests {
     // the digest matches and the run is skipped, it returns None.
     fn setup_failing_knip() -> TempDir {
         let tmp = setup_project(r#"{"gates":{"knip":true}}"#, &["package.json"]);
-        let bin_dir = tmp.join("node_modules/.bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-        let fake_knip = bin_dir.join("knip");
-        fs::write(&fake_knip, "#!/bin/sh\necho 'Unused export' >&2\nexit 1\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake_knip, fs::Permissions::from_mode(0o755)).unwrap();
+        test_utils::link_fake_bin(&tmp, "knip", "knip-unused-export");
         tmp
     }
 
@@ -714,12 +709,7 @@ mod tests {
     // file would never match the stored digest and every Bash call would re-run.
     fn setup_emitting_knip() -> TempDir {
         let tmp = setup_project(r#"{"gates":{"knip":true}}"#, &["package.json"]);
-        let bin_dir = tmp.join("node_modules/.bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-        let fake_knip = bin_dir.join("knip");
-        fs::write(&fake_knip, "#!/bin/sh\necho 'emit' > out.js\nexit 1\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake_knip, fs::Permissions::from_mode(0o755)).unwrap();
+        test_utils::link_fake_bin(&tmp, "knip", "knip-emit");
         tmp
     }
 
@@ -959,13 +949,7 @@ mod tests {
     fn failing_gate_returns_block_json() {
         let tmp = setup_project(r#"{"gates":{"knip":true}}"#, &["package.json"]);
 
-        let bin_dir = tmp.join("node_modules/.bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-        let fake_knip = bin_dir.join("knip");
-        fs::write(&fake_knip, "#!/bin/sh\necho 'Unused export' >&2\nexit 1\n").unwrap();
-
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake_knip, fs::Permissions::from_mode(0o755)).unwrap();
+        test_utils::link_fake_bin(&tmp, "knip", "knip-unused-export");
 
         let audit_dir = tmp.join("audit");
         let result = run_with_overrides(
@@ -995,12 +979,7 @@ mod tests {
         // JSON without panicking.
         let tmp = setup_project(r#"{"gates":{"knip":true}}"#, &["package.json"]);
 
-        let bin_dir = tmp.join("node_modules/.bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-        let fake_knip = bin_dir.join("knip");
-        fs::write(&fake_knip, "#!/bin/sh\necho 'Unused export' >&2\nexit 1\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake_knip, fs::Permissions::from_mode(0o755)).unwrap();
+        test_utils::link_fake_bin(&tmp, "knip", "knip-unused-export");
 
         // A file where the audit dir's parent should be → create_dir_all errors.
         let blocker = tmp.join("blocker");
@@ -1246,12 +1225,7 @@ mod tests {
         )
         .unwrap();
 
-        let bin_dir = tmp.join("node_modules/.bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-        let fake_knip = bin_dir.join("knip");
-        fs::write(&fake_knip, "#!/bin/sh\necho 'Unused export' >&2\nexit 1\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake_knip, fs::Permissions::from_mode(0o755)).unwrap();
+        test_utils::link_fake_bin(&tmp, "knip", "knip-unused-export");
 
         let result = run_with_overrides(
             &tmp,

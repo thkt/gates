@@ -1,0 +1,8 @@
+#!/bin/sh
+out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--output" ]; then out="$2"; fi
+  shift
+done
+mkdir -p "$out"
+cp jscpd-report-src.json "$out/jscpd-report.json"

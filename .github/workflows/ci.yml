@@ -75,10 +75,10 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - name: Install cargo-llvm-cov
+      - name: Install cargo-llvm-cov and nextest
         uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2.81.11
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov,cargo-nextest
 
       - name: Coverage delta gate (project C0 must not drop vs main)
         run: |
@@ -88,12 +88,23 @@ jobs:
           # HEAD = PR merged into main (the checked-out pull_request ref).
           # cargo llvm-cov cleans stale profraw at the start of each run, so the
           # two measurements below do not mix.
-          cargo llvm-cov --ignore-filename-regex 'src/test_utils\.rs$' --lcov --output-path head.info
+          # Run via nextest (process-per-test), not libtest (thread-per-test): #59.
+          # libtest runs every test in one process, so a thread writing a fake bin
+          # holds a writable fd that a sibling thread's Command::spawn fork()
+          # inherits; the later exec of that bin then trips ETXTBSY
+          # (deny_write_access). llvm-cov instrumentation widens the window enough
+          # to flake. nextest isolates each test in its own process, so no sibling
+          # shares the fd table and the cross-test fd inheritance cannot happen.
+          # This matches the test job's runner and fixes both head and base
+          # (base still runs main's pre-fix write-then-exec paths until #59 lands).
+          # gates has no lib target, so there are no doctests for nextest to skip;
+          # coverage stays equivalent to the libtest run.
+          cargo llvm-cov nextest --profile ci --ignore-filename-regex 'src/test_utils\.rs$' --lcov --output-path head.info
           head_c0=$(c0 head.info)
           # BASE = main (fetch-depth:0 already has the history).
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           git checkout --quiet --force origin/main
-          cargo llvm-cov --ignore-filename-regex 'src/test_utils\.rs$' --lcov --output-path base.info
+          cargo llvm-cov nextest --profile ci --ignore-filename-regex 'src/test_utils\.rs$' --lcov --output-path base.info
           base_c0=$(c0 base.info)
           # 0.1pp tolerance absorbs instrumentation rounding / total line drift.
           awk -v b="$base_c0" -v h="$head_c0" 'BEGIN {
