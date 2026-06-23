@@ -33,68 +33,83 @@ enum Color {
 
 fn find_cycles(graph: &HashMap<PathBuf, Vec<PathBuf>>) -> Vec<Vec<PathBuf>> {
     let mut colors: HashMap<&PathBuf, Color> = graph.keys().map(|k| (k, Color::White)).collect();
-    let mut path: Vec<PathBuf> = Vec::new();
     let mut seen_cycles: HashSet<Vec<PathBuf>> = HashSet::new();
     let mut cycles: Vec<Vec<PathBuf>> = Vec::new();
 
     for node in graph.keys() {
         if colors[node] == Color::White {
-            dfs(
-                node,
-                graph,
-                &mut colors,
-                &mut path,
-                &mut seen_cycles,
-                &mut cycles,
-            );
+            dfs(node, graph, &mut colors, &mut seen_cycles, &mut cycles);
         }
     }
     cycles
 }
 
-fn dfs(
-    node: &PathBuf,
-    graph: &HashMap<PathBuf, Vec<PathBuf>>,
-    colors: &mut HashMap<&PathBuf, Color>,
-    path: &mut Vec<PathBuf>,
+/// Iterative three-color DFS. An explicit heap stack of `(node, next neighbor
+/// index)` frames replaces recursion so depth is bounded by heap, not the thread
+/// stack: a deep non-cyclic chain that would overflow recursive descent (an
+/// uncatchable abort, defeating the fail-open join fallback) is traversed safely.
+/// The stack doubles as the current DFS path (Gray nodes are exactly its
+/// members), so frame order and Gray back-edge recording mirror the recursive
+/// form and the set of detected cycles is unchanged.
+fn dfs<'a>(
+    start: &'a PathBuf,
+    graph: &'a HashMap<PathBuf, Vec<PathBuf>>,
+    colors: &mut HashMap<&'a PathBuf, Color>,
     seen: &mut HashSet<Vec<PathBuf>>,
     cycles: &mut Vec<Vec<PathBuf>>,
 ) {
-    if let Some(c) = colors.get_mut(node) {
+    if let Some(c) = colors.get_mut(start) {
         *c = Color::Gray;
     }
-    path.push(node.clone());
+    let mut stack: Vec<(&'a PathBuf, usize)> = vec![(start, 0)];
 
-    if let Some(neighbors) = graph.get(node) {
-        for next in neighbors {
+    while let Some(&(node, idx)) = stack.last() {
+        let neighbors = graph.get(node);
+        if let Some(next) = neighbors.and_then(|n| n.get(idx)) {
+            stack.last_mut().unwrap().1 = idx + 1;
             match colors.get(next).copied() {
                 Some(Color::White) => {
-                    dfs(next, graph, colors, path, seen, cycles);
-                }
-                Some(Color::Gray) => {
-                    if let Some(start) = path.iter().position(|p| p == next) {
-                        let mut cycle: Vec<PathBuf> = path[start..].to_vec();
-                        if let Some(min_idx) = cycle
-                            .iter()
-                            .enumerate()
-                            .min_by_key(|(_, p)| (*p).clone())
-                            .map(|(i, _)| i)
-                        {
-                            cycle.rotate_left(min_idx);
-                        }
-                        if seen.insert(cycle.clone()) {
-                            cycles.push(cycle);
-                        }
+                    if let Some(c) = colors.get_mut(next) {
+                        *c = Color::Gray;
                     }
+                    stack.push((next, 0));
                 }
+                Some(Color::Gray) => record_cycle(next, &stack, seen, cycles),
                 _ => {}
             }
+            continue;
         }
-    }
 
-    path.pop();
-    if let Some(c) = colors.get_mut(node) {
-        *c = Color::Black;
+        // Neighbors exhausted: leave `node` (post-visit) and pop its frame.
+        if let Some(c) = colors.get_mut(node) {
+            *c = Color::Black;
+        }
+        stack.pop();
+    }
+}
+
+/// Record the cycle closed by a back edge to the Gray node `next`: the path of
+/// nodes on `stack` from `next` onward, rotated to start at its lexicographically
+/// smallest member so rotations of one cycle dedup to a single canonical entry.
+fn record_cycle(
+    next: &PathBuf,
+    stack: &[(&PathBuf, usize)],
+    seen: &mut HashSet<Vec<PathBuf>>,
+    cycles: &mut Vec<Vec<PathBuf>>,
+) {
+    if let Some(start) = stack.iter().position(|&(p, _)| p == next) {
+        let mut cycle: Vec<PathBuf> = stack[start..].iter().map(|&(p, _)| p.clone()).collect();
+        if let Some(min_idx) = cycle
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, p)| (*p).clone())
+            .map(|(i, _)| i)
+        {
+            cycle.rotate_left(min_idx);
+        }
+        if seen.insert(cycle.clone()) {
+            cycles.push(cycle);
+        }
     }
 }
 
@@ -232,6 +247,48 @@ mod tests {
 
         let result = detect_in(&depgraph::build(&src), &src);
         assert!(result.cycles.is_empty());
+    }
+
+    #[test]
+    fn deep_acyclic_chain_does_not_overflow() {
+        // A single deep non-cyclic chain p0 -> p1 -> ... -> p(N-1). The recursive
+        // dfs recursed once per chain link and overflowed the thread stack
+        // (uncatchable SIGABRT) at this depth; the iterative dfs is heap-bounded
+        // and reports no cycles. Calls find_cycles directly to skip filesystem +
+        // parse and keep the synthetic graph in memory.
+        let n = 50_000;
+        let mut graph: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for i in 0..n {
+            let edges = if i + 1 < n {
+                vec![PathBuf::from(format!("/p{}.ts", i + 1))]
+            } else {
+                Vec::new()
+            };
+            graph.insert(PathBuf::from(format!("/p{i}.ts")), edges);
+        }
+
+        let cycles = find_cycles(&graph);
+        assert!(cycles.is_empty());
+    }
+
+    #[test]
+    fn deep_chain_closed_into_single_cycle() {
+        // The same deep chain with the tail linked back to the head, forming one
+        // cycle of length N. Proves the iterative rewrite preserves cycle
+        // detection at depth: exactly one cycle spanning all N nodes is reported.
+        let n = 50_000;
+        let mut graph: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for i in 0..n {
+            let next = (i + 1) % n;
+            graph.insert(
+                PathBuf::from(format!("/p{i}.ts")),
+                vec![PathBuf::from(format!("/p{next}.ts"))],
+            );
+        }
+
+        let cycles = find_cycles(&graph);
+        assert_eq!(cycles.len(), 1);
+        assert_eq!(cycles[0].len(), n);
     }
 
     #[test]
