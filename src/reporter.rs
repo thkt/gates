@@ -1,5 +1,5 @@
 use crate::color;
-use crate::tools::ToolResult;
+use crate::runner::ToolResult;
 
 // Match guardrails separator lengths (header + "Gates " = 50, footer = 50).
 // Private: the BLOCKED skeleton (blocked_header/blocked_footer) is the only
@@ -106,7 +106,7 @@ fn push_preview(lines: &mut Vec<String>, output: &str, colorize: fn(&str) -> Str
 mod tests {
     use super::*;
     use crate::color::strip_ansi;
-    use crate::tools::GateOutcome;
+    use crate::runner::GateOutcome;
 
     fn passed(name: &'static str) -> ToolResult {
         ToolResult {
