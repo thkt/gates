@@ -118,7 +118,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "litmus"
 version = "0.3.0"
-source = "git+https://github.com/thkt/litmus.git#6467a49241f444af5ea5d58af7860fb0c3c028b1"
+source = "git+https://github.com/thkt/litmus.git#1cc3591b1031444ee6312dbf181265d93f2be873"
 dependencies = [
  "glob",
  "oxc_allocator",
@@ -447,9 +447,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.45"
+version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
 dependencies = [
  "proc-macro2",
 ]
