@@ -524,8 +524,11 @@ pub const DEFAULT_JSCPD_THRESHOLD: f64 = 10.0;
 /// `node_modules` is normally excluded by jscpd's gitignore handling, but is
 /// listed here so a repo that does not gitignore it still skips the scan (which
 /// would otherwise blow the gate's timeout). jscpd's own docs use this glob.
+/// `.git` is not covered by gitignore (it is the git dir itself); its sample
+/// hooks are near-identical and would surface as clone groups, so exclude it.
 pub const DEFAULT_JSCPD_IGNORE: &[&str] = &[
     "**/node_modules/**",
+    "**/.git/**",
     "**/*.test.*",
     "**/*.spec.*",
     "**/generated/**",
@@ -1500,6 +1503,40 @@ test('works', () => {
             result.is_skipped(),
             "stale report must not be read as the current run: {}",
             result.output()
+        );
+    }
+
+    // The default ignore list keeps jscpd out of the `.git` directory, whose
+    // sample hooks are near-identical and would otherwise surface as clone
+    // groups. Verify the glob reaches jscpd's `--ignore` argument end to end.
+    #[test]
+    fn jscpd_default_ignore_excludes_git_dir() {
+        let _guard = JSCPD_RUN_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let tmp = TempDir::new("jscpd-args");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        link_fake_bin(&tmp, "jscpd", "jscpd-record-args");
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+
+        let ignore: Vec<String> = DEFAULT_JSCPD_IGNORE
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let _ = run_jscpd(&project, 5, 50, 10.0, false, &ignore);
+
+        let args = fs::read_to_string(tmp.join("jscpd-args.txt")).unwrap();
+        let ignore_line = args
+            .lines()
+            .find(|l| l.contains("**/.git/**") || l.contains(','))
+            .unwrap_or("");
+        assert!(
+            ignore_line.contains("**/.git/**"),
+            "jscpd --ignore must exclude the .git dir, got args:\n{args}"
         );
     }
 }
