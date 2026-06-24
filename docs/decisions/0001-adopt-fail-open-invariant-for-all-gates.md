@@ -8,7 +8,7 @@ decision-makers: [thkt]
 
 ## Context and Problem Statement
 
-gates runs as a PostToolUse hook on every AI edit. A gate that throws, times out, finds no binary, or panics must never block the agent's edit cycle. Today this behavior is implemented ad hoc at each gate site (tools.rs:48,619; main.rs:96,300,489; config.rs:68; audit.rs:1-3; runner.rs:13) and stated as a fact in OUTCOME.md:49, but no rule obliges a future-added gate to follow it. A new contributor can write a gate that returns `Result` and propagates an error, silently breaking the never-block contract. How do we make fail-open a binding rule rather than a coincidence of the current code?
+gates runs as a PostToolUse hook on every AI edit. A gate that throws, times out, finds no binary, or panics must never block the agent's edit cycle. This behavior is funneled through `runner::join_or_skip` (runner.rs:204) — the single sink reached from `join_into` (main.rs:118), degrading a failed gate to `GateOutcome::Skipped` (runner.rs:16) — and stated as a fact in OUTCOME.md, but no rule obliges a future-added gate to route its error paths there. A new contributor can write a gate that returns `Result` and propagates an error, silently breaking the never-block contract. How do we make fail-open a binding rule rather than a coincidence of the current code?
 
 ## Decision Drivers
 
@@ -30,11 +30,11 @@ Chosen option: ADR + funnel-to-Skipped convention, because the invariant is not 
 
 - Good, because every new gate has one rule to follow: any error/timeout/panic/missing-binary path resolves to `GateOutcome::Skipped`, never a propagated error or non-zero hook exit
 - Good, because the agent's edit cycle is protected by an explicit contract, not scattered precedent
-- Bad, because enforcement stays manual (code review), so a gate that crashes the process (e.g. stack overflow, see Reassessment Triggers) can still bypass it
+- Bad, because enforcement stays manual (code review), so a gate that crashes the process (e.g. stack overflow, see Reassessment Triggers) can still bypass it. The one known such path, recursive DFS in circular.rs, was since stackified to bounded-heap iteration; other gates remain unguarded
 
 ### Confirmation
 
-Code review of any new gate: confirm every error path returns `GateOutcome::Skipped` and the gate's thread is joined through `main::join_into` with fallback names. Existing tests `invalid_json_enables_all_gates`, `query_skips_corrupt_lines`, and the panic→skipped join tests guard the established sites.
+Code review of any new gate: confirm every error path returns `GateOutcome::Skipped` and the gate's thread is joined through `main::join_into` (main.rs:118), which delegates to `runner::join_or_skip` (runner.rs:204) — the single home of the policy — with fallback names. Existing tests `invalid_json_enables_all_gates`, `query_skips_corrupt_lines`, and the panic→skipped join test `join_into_maps_panic_to_skipped_per_fallback_name` guard the established sites.
 
 ## More Information
 
