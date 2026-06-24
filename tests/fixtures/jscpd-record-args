@@ -1,0 +1,7 @@
+#!/bin/sh
+# Records the full argument list (one per line) to jscpd-args.txt in the cwd,
+# then writes no report so run_jscpd treats the run as a fail-open skip.
+for a in "$@"; do
+  printf '%s\n' "$a" >>jscpd-args.txt
+done
+exit 0
