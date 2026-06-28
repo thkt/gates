@@ -5,7 +5,9 @@ use crate::coupling;
 use crate::depgraph;
 use crate::project::ProjectInfo;
 use crate::resolve;
-use crate::runner::{GATE_TIMEOUT, ToolResult, join_or_skip, run_command, run_command_with_label};
+use crate::runner::{
+    GATE_TIMEOUT, GateOutcome, ToolResult, join_or_skip, run_command, run_command_with_label,
+};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::env;
@@ -259,11 +261,15 @@ pub fn run_script_gates(gates: &[ScriptGate], project_dir: &Path) -> Vec<ToolRes
 
     if let Some(tc) = type_check {
         let tc_result = run_shell_command("type-check", &tc.command, tc.hint, project_dir);
-        let type_failed = tc_result.is_failure();
+        let tc_result = downgrade_if_unbootstrapped(tc_result);
+        // Skip test on a real type failure (cascade) and also when type-check was
+        // downgraded to an unbootstrapped-env Warned: test runs the same project
+        // and would re-hit the identical missing-module noise (issue #89).
+        let skip_test = tc_result.is_failure() || tc_result.is_warning();
         results.push(tc_result);
 
         if let Some(t) = test {
-            if type_failed {
+            if skip_test {
                 results.push(ToolResult::skipped("test"));
             } else {
                 results.push(run_shell_command("test", &t.command, t.hint, project_dir));
@@ -679,6 +685,64 @@ pub fn run_jscpd(
     outcome
 }
 
+/// Distinct banner prepended to a downgraded type gate's output so the human reads
+/// "this is an environment problem, not a code defect" as the first advisory line
+/// (issue #89 asks for a distinct message). Prepended rather than carried in `hint`
+/// because the advisory render path (`reporter::append_advisories`) previews
+/// `output()`, not `hint`.
+const ENV_NOT_READY_BANNER: &str = "Environment not bootstrapped: dependencies or codegen outputs are missing \
+     (unresolved modules below). Run the project's install/codegen (e.g. `npm install`), \
+     then re-run. Advisory only — not blocking.";
+
+/// True when a type checker's failure carries an unresolved-module error (TS2307),
+/// the signal that the project isn't bootstrapped — dependencies uninstalled or
+/// codegen not run — rather than holding a logic defect. `tsc` and `tsgo` both emit
+/// `error TS2307` for an absent package AND for an absent relative import of a
+/// not-yet-generated file, so one diagnostic code covers both unbootstrapped shapes
+/// (issue #89; the issue quotes the exact strings).
+///
+/// Deliberately dumb: it matches exactly one code, not a taxonomy. A present TS2307
+/// downgrades the *whole* run to advisory even when other diagnostics coexist (e.g.
+/// the issue's prisma `error TS2339`). This is a deliberate tradeoff, not precision
+/// loss: unresolved modules are a whole-run property. TypeScript checks the program
+/// as a whole, so an unresolved import resolves to `any` and poisons inference
+/// across every file that touches it — masking real errors and fabricating spurious
+/// ones. No single diagnostic from a broken-resolution run is trustworthy, so the
+/// coherent action is to advise on the entire run rather than block on any of it.
+///
+/// The cost: a genuine type error that coexists with a TS2307 in one run is not
+/// blocked during that run. It is not buried — the full output is still shown to
+/// the human (advisory) — and it re-blocks once resolution succeeds and the TS2307
+/// clears. The strict alternative (downgrade only when TS2307 is the *sole* error)
+/// was rejected: it cannot see past the 50-line output truncation, and it leaves
+/// the issue's headline tsgo example (TS2307 + TS2339) blocking — the case #89
+/// exists to fix.
+///
+/// Matching the code (not the message text) keeps detection locale-independent; if
+/// TypeScript renumbers TS2307 the match stops and the gate reverts to today's
+/// blocking behavior (fail-safe).
+fn is_unbootstrapped_failure(output: &str) -> bool {
+    output.contains("error TS2307:")
+}
+
+/// Reclassify a type gate's blocking `Failed` as an advisory `Warned` when its
+/// failure is an unbootstrapped environment (issue #89), prefixing the distinct
+/// banner and preserving the captured output so the human still sees both via
+/// stderr. Non-failures and real type failures pass through unchanged.
+fn downgrade_if_unbootstrapped(mut result: ToolResult) -> ToolResult {
+    if let GateOutcome::Failed(text) = &result.outcome
+        && is_unbootstrapped_failure(text)
+    {
+        // Build the banner-prefixed output by hand rather than via
+        // `ToolResult::warned`, which re-runs `tail_lines` and would drop the
+        // prepended banner once the (already-truncated) text fills the limit.
+        let downgraded = format!("{ENV_NOT_READY_BANNER}\n{text}");
+        result.hint = "";
+        result.outcome = GateOutcome::Warned(downgraded);
+    }
+    result
+}
+
 pub fn run_gate(gate: &GateDefinition, project: &ProjectInfo) -> ToolResult {
     if !(gate.condition)(project) {
         return ToolResult::skipped(gate.name);
@@ -689,12 +753,19 @@ pub fn run_gate(gate: &GateDefinition, project: &ProjectInfo) -> ToolResult {
     cmd.args(gate.args).current_dir(&project.root);
     let mut result = run_command(gate.name, cmd, GATE_TIMEOUT);
     result.hint = gate.hint;
-    result
+    // tsgo is intentionally the sole gate that surfaces an unbootstrapped env: only
+    // it emits TS2307, so the predicate is false for every other gate and this is a
+    // no-op there (no per-gate guard needed). The cause is project-level, so sibling
+    // gates (depcruise/knip) can independently block on the same missing module; that
+    // residual is accepted for #89's scope rather than downgrading every gate.
+    downgrade_if_unbootstrapped(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::strip_ansi;
+    use crate::reporter::format_summary;
     use crate::test_utils::{TempDir, link_fake_bin};
     use std::fs;
     use std::path::PathBuf;
@@ -809,6 +880,144 @@ mod tests {
         assert!(
             test_result.is_skipped(),
             "test should be skipped when type-check fails"
+        );
+    }
+
+    // T-89-1: a failure of only TS2307 missing-package errors reads as unbootstrapped.
+    #[test]
+    fn unbootstrapped_detects_missing_package() {
+        let output = "src/a.ts(1,23): error TS2307: Cannot find module 'remark-cjk-friendly' or its corresponding type declarations.";
+        assert!(is_unbootstrapped_failure(output));
+    }
+
+    // T-89-2: a TS2307 on a relative import (codegen output not yet generated) also
+    // reads as unbootstrapped — the same diagnostic code covers missing files.
+    #[test]
+    fn unbootstrapped_detects_missing_codegen_file() {
+        let output = "src/api.ts(3,10): error TS2307: Cannot find module './llmApi.generated' or its corresponding type declarations.";
+        assert!(is_unbootstrapped_failure(output));
+    }
+
+    // T-89-3: a real type error (non-TS2307) is not an unbootstrapped env.
+    #[test]
+    fn unbootstrapped_false_for_real_type_error() {
+        let output = "src/x.ts(5,1): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.";
+        assert!(!is_unbootstrapped_failure(output));
+    }
+
+    // T-89-4: a coexisting error (e.g. the issue's prisma TS2339) does not defeat
+    // detection — any present TS2307 marks the run as unbootstrapped, so the issue's
+    // headline tsgo example (TS2307 + TS2339) downgrades instead of blocking. The
+    // genuine error re-surfaces as blocking once the env is bootstrapped (TS2307 gone).
+    #[test]
+    fn unbootstrapped_true_when_other_error_coexists() {
+        let output = "src/a.ts(1,1): error TS2307: Cannot find module 'x'\n\
+                      app/models/x.ts(59,30): error TS2339: Property 'updateTask' does not exist on type 'PrismaClient'.";
+        assert!(is_unbootstrapped_failure(output));
+    }
+
+    // T-89-5: output with no TS diagnostics (empty / non-TS crash) is not unbootstrapped.
+    #[test]
+    fn unbootstrapped_false_without_ts_errors() {
+        assert!(!is_unbootstrapped_failure(""));
+        assert!(!is_unbootstrapped_failure("Segmentation fault"));
+    }
+
+    // T-89-6: a tsgo Failed carrying TS2307 is downgraded to an advisory Warned that
+    // prefixes the distinct env-not-ready banner and preserves the captured output.
+    #[test]
+    fn downgrade_turns_unbootstrapped_failure_into_warning() {
+        let failed = ToolResult::failed(
+            "tsgo",
+            "Fix type errors.",
+            "src/a.ts(1,1): error TS2307: Cannot find module 'x'",
+        );
+        let result = downgrade_if_unbootstrapped(failed);
+        assert!(result.is_warning(), "TS2307 failure should downgrade");
+        assert!(!result.is_failure());
+        assert!(
+            result.output().contains("TS2307"),
+            "preserves original output"
+        );
+        assert!(
+            result.output().starts_with("Environment not bootstrapped"),
+            "distinct banner must lead the advisory output: {}",
+            result.output()
+        );
+    }
+
+    // T-89-6b: a real type failure passes through downgrade unchanged (stays blocking).
+    #[test]
+    fn downgrade_keeps_real_failure_blocking() {
+        let failed = ToolResult::failed(
+            "tsgo",
+            "Fix type errors.",
+            "src/x.ts(5,1): error TS2345: not assignable",
+        );
+        let result = downgrade_if_unbootstrapped(failed);
+        assert!(result.is_failure(), "real type error must keep blocking");
+    }
+
+    // T-89-7: a type-check that fails with only TS2307 downgrades to Warned AND skips
+    // test (test shares the unbootstrapped env and would re-report the same noise).
+    #[test]
+    fn type_check_unbootstrapped_downgrades_and_skips_test() {
+        let tmp = TempDir::new("cascade-env");
+        fs::create_dir_all(tmp.join(".git")).unwrap();
+
+        let type_gate = ScriptGate {
+            name: "type-check",
+            command: "echo \"src/a.ts(1,1): error TS2307: Cannot find module 'x'\"; exit 1".into(),
+            hint: "Fix type errors.",
+        };
+        let test_gate = ScriptGate {
+            name: "test",
+            command: "echo test-ok".into(),
+            hint: "Fix test failures.",
+        };
+        let results = run_script_gates(&[type_gate, test_gate], &tmp);
+        let type_result = results.iter().find(|r| r.name == "type-check").unwrap();
+        let test_result = results.iter().find(|r| r.name == "test").unwrap();
+        assert!(
+            type_result.is_warning(),
+            "TS2307-only type-check failure should downgrade to advisory Warned"
+        );
+        assert!(
+            test_result.is_skipped(),
+            "test must be skipped when the env is unbootstrapped"
+        );
+    }
+
+    // T-89-9: end-to-end render. A downgraded tsgo result, run through the real
+    // reporter, surfaces the env-not-ready banner as the first advisory preview
+    // line (the banner is one logical line, so push_preview's non-blank filter
+    // keeps it leading) and stays out of the BLOCKED section.
+    #[test]
+    fn downgraded_result_renders_banner_first_in_advisory() {
+        let failed = ToolResult::failed(
+            "tsgo",
+            "Fix type errors.",
+            "src/a.ts(1,1): error TS2307: Cannot find module 'remark-cjk-friendly'",
+        );
+        let downgraded = downgrade_if_unbootstrapped(failed);
+        let rendered = strip_ansi(&format_summary(&[downgraded]));
+        assert!(
+            !rendered.contains("BLOCKED"),
+            "downgraded env failure must not block: {rendered}"
+        );
+        assert!(
+            rendered.contains("advisory warning"),
+            "must render under the advisory section: {rendered}"
+        );
+        let banner_pos = rendered
+            .find("Environment not bootstrapped")
+            .expect("banner must render");
+        let detail_pos = rendered
+            .find("TS2307")
+            .expect("original output must render");
+        assert!(
+            banner_pos < detail_pos,
+            "banner must precede the captured TS2307 detail: {rendered}"
         );
     }
 
