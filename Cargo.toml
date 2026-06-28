@@ -1,6 +1,6 @@
 [package]
 name = "gates"
-version = "0.11.1"
+version = "0.12.0"
 edition = "2024"
 description = "Claude Code completion hook for parallel gate execution"
 license = "MIT"
