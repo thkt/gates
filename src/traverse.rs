@@ -1,15 +1,27 @@
-use std::path::Path;
+use std::env;
+use std::path::{Path, PathBuf};
 
 const MAX_TRAVERSAL_DEPTH: usize = 20;
 
-/// Stops at `.git` boundary (after visiting that directory) or depth limit.
+/// Stops at the `.git` boundary (after visiting that directory), at `$HOME`
+/// (which is inspected but whose ancestors are not), or at the depth limit.
+/// The `$HOME` fence mirrors formatter's `bounded_ancestors` so the two
+/// resolvers' ancestor walks stay aligned (independent copies, no drift). The
+/// third sibling, guardrails, deliberately keeps a different model
+/// (`canonicalize` + `project_root` boundary, no fences) to preserve its
+/// `OutsideProjectRoot` forensic signal — so it is not unified with this walk.
 pub fn walk_ancestors<T>(start: &Path, mut visitor: impl FnMut(&Path) -> Option<T>) -> Option<T> {
+    let home = env::var_os("HOME").map(PathBuf::from);
     let mut current = start;
     for _ in 0..MAX_TRAVERSAL_DEPTH {
         if let Some(result) = visitor(current) {
             return Some(result);
         }
         if current.join(".git").exists() {
+            break;
+        }
+        // Inspect `$HOME` itself, then fence out everything above it.
+        if home.as_deref() == Some(current) {
             break;
         }
         match current.parent() {
