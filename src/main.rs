@@ -19,6 +19,7 @@ mod traverse;
 
 use std::env;
 use std::io::{self, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::process;
 use std::thread;
@@ -423,7 +424,21 @@ fn run_show(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    process::exit(dispatch(&args));
+    process::exit(dispatch_or_internal(|| dispatch(&args)));
+}
+
+/// Run `dispatch` under `catch_unwind`, mapping a panic to `Internal` (70). Gate
+/// **threads** are already isolated by `join_or_skip` (panic → `skipped`, the
+/// run continues), so only an orchestration-layer panic — config load, the block
+/// `json!`, reporter formatting — unwinds to here. The whole hook cannot produce
+/// a decision in that case, so surface it as `EX_SOFTWARE` rather than letting
+/// Rust's default exit 101 leak; per ADR-0066 Group 3 any non-2 exit is still
+/// non-blocking, so fail-open is preserved. This is the only live constructor of
+/// `HookExitCode::Internal`. `AssertUnwindSafe` is sound here: on a panic the
+/// process exits, so no caller observes half-mutated state across the boundary.
+fn dispatch_or_internal<F: FnOnce() -> i32>(run: F) -> i32 {
+    panic::catch_unwind(AssertUnwindSafe(run))
+        .unwrap_or_else(|_| i32::from(HookExitCode::Internal.code()))
 }
 
 /// Route argv to a subcommand and return the process exit code. Extracted from
@@ -517,6 +532,22 @@ mod tests {
         assert!(results.iter().all(runner::ToolResult::is_skipped));
         assert_eq!(results[0].name, "circular");
         assert_eq!(results[1].name, "coupling");
+    }
+
+    // An orchestration-layer panic (not a gate thread) unwinds to `main`'s
+    // `catch_unwind` and exits `Internal` (70), surfacing the fault instead of
+    // leaking Rust's default exit 101. The non-panicking path returns its code
+    // verbatim. The default panic hook prints one "panicked at" line to stderr
+    // here, matching the existing thread-panic tests; it is left in place rather
+    // than muted, which would install a process-global hook and swallow the
+    // diagnostics of any other test panicking in parallel.
+    #[test]
+    fn dispatch_or_internal_maps_panic_to_seventy() {
+        let panicked = dispatch_or_internal(|| panic!("orchestration blew up"));
+        let normal = dispatch_or_internal(|| 64);
+        assert_eq!(panicked, i32::from(HookExitCode::Internal.code()));
+        assert_eq!(panicked, 70);
+        assert_eq!(normal, 64);
     }
 
     fn setup_project(gates_json: &str, files: &[&str]) -> TempDir {

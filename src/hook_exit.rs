@@ -12,22 +12,26 @@
 //! | 1    | `Advisory`   | advisory failure (severity=warn)     | no (reserved)      |
 //! | 2    | `Blocking`   | blocking failure; child gate failed  | no (→ stdout JSON + exit 0) |
 //! | 64   | `InputError` | usage error / malformed hook input   | yes (CLI usage)    |
-//! | 70   | `Internal`   | internal panic / spawn failure       | no (fail-open → exit 0) |
+//! | 70   | `Internal`   | orchestration panic (caught)         | yes (`main` `catch_unwind`) |
 //!
-//! Only `InputError` (64) reaches a real process exit on the live paths, and
-//! only on direct-CLI usage errors (`gates a b c`, a non-directory argument) —
-//! the hook invocation (`gates`, dir = cwd) never trips them. On the hook path,
-//! `Blocking` is converted to stdout JSON + exit 0 by the caller, and any
-//! `Internal` fault is swallowed by fail-open (the gate is skipped, not raised).
-//! `Advisory` is reserved: every gate today is blocking. `EX_IOERR` (74) on the
-//! `gates show` path is an ADR-0060 I/O code orthogonal to this enum and lives
-//! as a separate constant.
+//! Two codes reach a real process exit on the live paths. `InputError` (64) on
+//! direct-CLI usage errors (`gates a b c`, a non-directory argument) — the hook
+//! invocation (`gates`, dir = cwd) never trips them. `Internal` (70) when an
+//! orchestration-layer panic (config load, the block `json!`, reporter
+//! formatting) unwinds to `main`'s `catch_unwind`; gate-thread panics never get
+//! here, as `join_or_skip` already maps them to `skipped`. Per Group 3 a non-2
+//! exit stays non-blocking, so 70 surfaces the fault without breaking fail-open.
+//! On the hook path `Blocking` is converted to stdout JSON + exit 0 by the
+//! caller. `Advisory` (1) is reserved: every gate today is blocking. `EX_IOERR`
+//! (74) on the `gates show` path is an ADR-0060 I/O code orthogonal to this enum
+//! and lives as a separate constant.
 
-// `Pass`, `Advisory`, `Blocking`, and `Internal` are reserved at the type level
-// per issue #18: the hook wrapper keeps exit 0 for the decision surface and
-// fail-open swallows internal faults, so only `InputError` reaches a live exit
-// today. The full Group 3 mapping is kept so a future hook-spec change can
-// switch the surface without redefining the type.
+// `Pass`, `Advisory`, and `Blocking` are reserved at the type level per issue
+// #18: the hook wrapper keeps exit 0 for the decision surface, so `Pass` (0) and
+// `Blocking` (2) never reach a live exit and `Advisory` (1) has no producer yet.
+// `InputError` and `Internal` are live (see the module doc). The full Group 3
+// mapping is kept so a future hook-spec change can switch the surface without
+// redefining the type.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookExitCode {
