@@ -234,7 +234,11 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
     }
 
     if config.is_enabled("clone") {
-        let p = project.clone();
+        // clone reads each package's own `src/` tree, so like circular/coupling
+        // it fans out over the discovered targets and labels each result with
+        // its owning package; a self-contained root yields one unlabeled result.
+        let clone_targets = targets.clone();
+        let root = project.root.clone();
         let min_nodes = config.clone.min_nodes.unwrap_or(clone::DEFAULT_MIN_NODES);
         let min_lines = config.clone.min_lines.unwrap_or(clone::DEFAULT_MIN_LINES);
         let block_threshold = config
@@ -244,7 +248,16 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
         tasks.push((
             vec!["clone"],
             thread::spawn(move || {
-                vec![tools::run_clone(&p, min_nodes, min_lines, block_threshold)]
+                clone_targets
+                    .iter()
+                    .map(|t| {
+                        scope_result(
+                            tools::run_clone(t, min_nodes, min_lines, block_threshold),
+                            &t.root,
+                            &root,
+                        )
+                    })
+                    .collect()
             }),
         ));
     }
@@ -1514,6 +1527,74 @@ mod tests {
             plain.contains("circular"),
             "the circular gate must fire: {plain}"
         );
+        assert!(
+            !plain.contains('['),
+            "a self-contained root must not label its output: {plain}"
+        );
+    }
+
+    // A duplicated function spanning 6 lines / >20 AST nodes, copied verbatim;
+    // two copies form one clone group. Mirrors tools::tests::CLONE_BODY.
+    const CLONE_BODY: &str = "export function compute(a: number, b: number) {\n  const x = a + b;\n  const y = x * 2;\n  const z = y - 1;\n  const w = z / 3;\n  return w + x;\n}\n";
+
+    // #105 (#102 same-shape): clone is a per-package src-axis gate, but its
+    // dispatch ran against the root alone. In a nested-package monorepo (root
+    // owns the workspace manifest, `src/` lives in `packages/app`) the root has
+    // no `src/`, so `run_clone` skipped instead of analyzing the member that
+    // owns the duplication. The fan-out must run clone inside `packages/app` and
+    // label the failure with that package.
+    #[test]
+    fn clone_fans_out_into_nested_package_and_labels_scope() {
+        let tmp = setup_project(
+            r#"{"gates":{"clone":true},"clone":{"blockThreshold":1}}"#,
+            &["package.json"],
+        );
+        let src = tmp.join("packages/app/src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(tmp.join("packages/app/package.json"), "{}").unwrap();
+        fs::write(src.join("a.ts"), CLONE_BODY).unwrap();
+        fs::write(src.join("b.ts"), CLONE_BODY).unwrap();
+
+        let block = run_with_overrides(
+            &tmp,
+            &tools::EnvOverrides {
+                audit_dir: Some(tmp.join("audit")),
+                ..Default::default()
+            },
+        )
+        .expect("the nested clone must block");
+        let plain = color::strip_ansi(&block);
+        assert!(plain.contains("clone"), "the clone gate must fire: {plain}");
+        assert!(
+            plain.contains("[packages/app]"),
+            "the failure must be labeled with the owning package: {plain}"
+        );
+    }
+
+    // The self-contained-root invariant for clone: a project owning its own
+    // `src/` runs the gate at the root and emits no package label, so single-
+    // package output stays byte-identical to the pre-fan-out behavior.
+    #[test]
+    fn clone_self_contained_root_failure_carries_no_scope_label() {
+        let tmp = setup_project(
+            r#"{"gates":{"clone":true},"clone":{"blockThreshold":1}}"#,
+            &["package.json"],
+        );
+        let src = tmp.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.ts"), CLONE_BODY).unwrap();
+        fs::write(src.join("b.ts"), CLONE_BODY).unwrap();
+
+        let block = run_with_overrides(
+            &tmp,
+            &tools::EnvOverrides {
+                audit_dir: Some(tmp.join("audit")),
+                ..Default::default()
+            },
+        )
+        .expect("the root clone must block");
+        let plain = color::strip_ansi(&block);
+        assert!(plain.contains("clone"), "the clone gate must fire: {plain}");
         assert!(
             !plain.contains('['),
             "a self-contained root must not label its output: {plain}"
