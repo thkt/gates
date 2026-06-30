@@ -17,7 +17,6 @@ use std::io;
 use std::iter;
 use std::panic::resume_unwind;
 use std::path::{Path, PathBuf};
-use std::process;
 use std::process::Command;
 use std::thread;
 
@@ -724,21 +723,26 @@ pub fn run_jscpd(
         return ToolResult::skipped("jscpd");
     }
 
-    let out_dir = env::temp_dir().join(format!("gates-jscpd-{}", process::id()));
-    // Clear any report left by a prior run whose cleanup failed before this PID
-    // was reused, so a stale report is never read as the current run's result.
-    let _ = fs::remove_dir_all(&out_dir);
-    if let Err(e) = fs::create_dir_all(&out_dir) {
-        eprintln!("gates: jscpd temp dir create failed: {e}");
-        return ToolResult::skipped("jscpd");
-    }
+    // A fresh, randomly-named temp dir per run (tempfile, CWE-377): an
+    // unprivileged process cannot predict the path to pre-create a symlink and
+    // hijack the report read/write. A unique name per run also means no stale
+    // report can survive across runs, and `TempDir`'s Drop removes the dir when
+    // this function returns.
+    let temp = match tempfile::tempdir() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("gates: jscpd temp dir create failed: {e}");
+            return ToolResult::skipped("jscpd");
+        }
+    };
+    let out_dir = temp.path();
 
     let bin = resolve::resolve_bin("jscpd", &project.root);
     let mut cmd = Command::new(&bin);
     cmd.arg(&project.root)
         .args(["--reporters", "json"])
         .arg("--output")
-        .arg(&out_dir)
+        .arg(out_dir)
         .arg("--silent")
         .args(["--min-lines", &min_lines.to_string()])
         .args(["--min-tokens", &min_tokens.to_string()]);
@@ -748,7 +752,9 @@ pub fn run_jscpd(
     cmd.current_dir(&project.root);
 
     let result = run_command("jscpd", cmd, GATE_TIMEOUT);
-    let outcome = if result.is_skipped() {
+    // `temp` (and thus `out_dir`) stays alive through this tail expression, then
+    // its Drop removes the temp dir as the function returns.
+    if result.is_skipped() {
         // Binary missing or timed out: fail-open.
         result
     } else {
@@ -766,12 +772,7 @@ pub fn run_jscpd(
                 ToolResult::skipped("jscpd")
             }
         }
-    };
-
-    if let Err(e) = fs::remove_dir_all(&out_dir) {
-        eprintln!("gates: jscpd temp dir cleanup failed: {e}");
     }
-    outcome
 }
 
 /// Distinct banner prepended to a downgraded type gate's output so the human reads
@@ -858,13 +859,6 @@ mod tests {
     use crate::test_utils::{TempDir, link_fake_bin};
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::{Mutex, PoisonError};
-
-    /// `run_jscpd` derives its temp output dir from the process PID, so the three
-    /// end-to-end tests below share one dir. Serialize them so one test's report
-    /// is never read (or wiped) by another running concurrently.
-    static JSCPD_RUN_LOCK: Mutex<()> = Mutex::new(());
-
     fn test_project(has_pkg: bool, has_ts: bool) -> ProjectInfo {
         ProjectInfo {
             root: PathBuf::from("/tmp/nonexistent"),
@@ -1879,9 +1873,6 @@ test("uppercases the provided first name", () => {
     // T-638: end-to-end — jscpd writes a report above threshold, gate warns.
     #[test]
     fn jscpd_warns_from_written_report() {
-        let _guard = JSCPD_RUN_LOCK
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
         let body = r#"{"statistics":{"total":{"percentage":25.0}},"duplicates":[{"lines":7,"firstFile":{"name":"a.ts"},"secondFile":{"name":"b.ts"}}]}"#;
         let (_tmp, project) = jscpd_project_with_fake_bin(body);
         let result = run_jscpd(&project, 5, 50, 10.0, false, &[]);
@@ -1892,39 +1883,9 @@ test("uppercases the provided first name", () => {
     // T-639: a binary that writes no report file skips (fail-open).
     #[test]
     fn jscpd_skips_when_report_missing() {
-        let _guard = JSCPD_RUN_LOCK
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
         let (_tmp, project) = jscpd_project_with_fake_bin("");
         let result = run_jscpd(&project, 5, 50, 10.0, false, &[]);
         assert!(result.is_skipped(), "missing report should skip, not block");
-    }
-
-    // T-640: a stale report left in the temp dir (prior run's cleanup failed,
-    // then PID reused) is not read as the current run's result. run_jscpd must
-    // start from a clean output dir.
-    #[test]
-    fn jscpd_ignores_stale_report_from_prior_run() {
-        let _guard = JSCPD_RUN_LOCK
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let out_dir = env::temp_dir().join(format!("gates-jscpd-{}", process::id()));
-        fs::create_dir_all(&out_dir).unwrap();
-        fs::write(
-            out_dir.join("jscpd-report.json"),
-            r#"{"statistics":{"total":{"percentage":99.0}},"duplicates":[]}"#,
-        )
-        .unwrap();
-
-        // The current run's binary writes no report (finds nothing / fails to emit).
-        let (_tmp, project) = jscpd_project_with_fake_bin("");
-        let result = run_jscpd(&project, 5, 50, 10.0, false, &[]);
-
-        assert!(
-            result.is_skipped(),
-            "stale report must not be read as the current run: {}",
-            result.output()
-        );
     }
 
     // The default ignore list keeps jscpd out of the `.git` directory, whose
@@ -1932,9 +1893,6 @@ test("uppercases the provided first name", () => {
     // groups. Verify the glob reaches jscpd's `--ignore` argument end to end.
     #[test]
     fn jscpd_default_ignore_excludes_git_dir() {
-        let _guard = JSCPD_RUN_LOCK
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
         let tmp = TempDir::new("jscpd-args");
         fs::write(tmp.join("package.json"), "{}").unwrap();
         link_fake_bin(&tmp, "jscpd", "jscpd-record-args");

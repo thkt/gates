@@ -1,8 +1,15 @@
 use std::env;
+use std::io::{IsTerminal, stderr};
 use std::sync::LazyLock;
 
 fn use_color() -> bool {
-    static COLOR: LazyLock<bool> = LazyLock::new(|| env::var_os("NO_COLOR").is_none());
+    // ANSI only when `NO_COLOR` is unset and stderr is a real terminal. The
+    // human-facing colored output (the gate summary) goes to stderr; under a
+    // hook both streams are pipes, so this also keeps escapes out of the block
+    // JSON `reason` on stdout, which an agent reads as plain text. Mirrors
+    // guardrails `io/color.rs`.
+    static COLOR: LazyLock<bool> =
+        LazyLock::new(|| env::var_os("NO_COLOR").is_none() && stderr().is_terminal());
     *COLOR
 }
 

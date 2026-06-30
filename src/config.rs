@@ -65,6 +65,14 @@ impl GatesConfig {
         }
     }
 
+    /// Load `.claude/tools.json`. Fail-open by design: a missing file, an
+    /// unreadable file, or invalid JSON falls back to `Self::default()` (every
+    /// gate enabled) after surfacing the cause on stderr. A broken config must
+    /// widen detection, never silently disable quality enforcement — disabling
+    /// gates on error would be a silent failure that lets violations through.
+    /// This diverges intentionally from guardrails/formatter, which fail-closed,
+    /// because gates is the post-edit audit half and a missing audit is the
+    /// worse outcome than a noisy one.
     pub fn load(project_dir: &Path) -> Self {
         let path = project_dir.join(TOOLS_CONFIG_FILE);
         let content = match fs::read_to_string(&path) {
