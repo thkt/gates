@@ -61,7 +61,7 @@ Detected from `package.json` scripts. The package manager is auto-detected from 
 | type-check | `"test:type"` or `"typecheck"` | Independent                 |
 | test       | `"test:unit"` or `"test"`      | Skipped if type-check fails |
 
-When no lock file is found, script gates are silently skipped (fail-open). Environment variable overrides (`$LINT_CMD`, `$TYPE_CMD`, `$UNIT_CMD`) bypass auto-detection and run the specified command directly.
+When no lock file is found, script gates are silently skipped (fail-open). Environment variable overrides (`$GATES_LINT_CMD`, `$GATES_TYPE_CMD`, `$GATES_UNIT_CMD`) bypass auto-detection and run the specified command directly.
 
 ## Required Tools
 
@@ -270,14 +270,14 @@ The clone gate hashes the oxc AST of every `src/` file to find Type 1 (whitespac
 
 Override script gate commands with environment variables:
 
-| Variable    | Overrides        | Example                   |
-| ----------- | ---------------- | ------------------------- |
-| `$LINT_CMD` | lint gate        | `LINT_CMD="eslint ."`     |
-| `$TYPE_CMD` | type-check       | `TYPE_CMD="tsc --noEmit"` |
-| `$UNIT_CMD` | test gate        | `UNIT_CMD="vitest run"`   |
-| `$TEST_CMD` | all script gates | Legacy single-gate mode   |
+| Variable          | Overrides        | Example                         |
+| ----------------- | ---------------- | ------------------------------- |
+| `$GATES_LINT_CMD` | lint gate        | `GATES_LINT_CMD="eslint ."`     |
+| `$GATES_TYPE_CMD` | type-check       | `GATES_TYPE_CMD="tsc --noEmit"` |
+| `$GATES_UNIT_CMD` | test gate        | `GATES_UNIT_CMD="vitest run"`   |
+| `$GATES_TEST_CMD` | all script gates | Single-gate mode                |
 
-When `$TEST_CMD` is set, script gate detection is skipped and only the specified command runs (backwards compatibility with completion-gate.sh).
+When `$GATES_TEST_CMD` is set, script gate detection is skipped and only the specified command runs. The `GATES_` prefix keeps these overrides from colliding with unrelated CI or project variables such as a bare `TEST_CMD=jest`.
 
 ### Config Resolution
 

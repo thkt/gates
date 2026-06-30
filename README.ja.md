@@ -59,7 +59,7 @@ Claude Codeの[PostToolUseフック](https://docs.anthropic.com/en/docs/claude-c
 | type-check | `"test:type"` or `"typecheck"` | 独立実行                    |
 | test       | `"test:unit"` or `"test"`      | type-check 失敗時はスキップ |
 
-ロックファイルが見つからない場合、スクリプトゲートは静かにスキップされます（フェイルオープン）。環境変数オーバーライド（`$LINT_CMD`, `$TYPE_CMD`, `$UNIT_CMD`）を使うと自動検出をバイパスして直接コマンドを実行できます。
+ロックファイルが見つからない場合、スクリプトゲートは静かにスキップされます（フェイルオープン）。環境変数オーバーライド（`$GATES_LINT_CMD`, `$GATES_TYPE_CMD`, `$GATES_UNIT_CMD`）を使うと自動検出をバイパスして直接コマンドを実行できます。
 
 ## 必要なツール
 
@@ -212,14 +212,14 @@ gates は ADR-0066 Group 3 (Hook tool) の終了コード規約に従い、PreTo
 
 環境変数でスクリプトゲートのコマンドを上書きできます。
 
-| 変数        | 対象               | 例                        |
-| ----------- | ------------------ | ------------------------- |
-| `$LINT_CMD` | lint ゲート        | `LINT_CMD="eslint ."`     |
-| `$TYPE_CMD` | type-check         | `TYPE_CMD="tsc --noEmit"` |
-| `$UNIT_CMD` | test ゲート        | `UNIT_CMD="vitest run"`   |
-| `$TEST_CMD` | 全スクリプトゲート | レガシー単一ゲートモード  |
+| 変数              | 対象               | 例                              |
+| ----------------- | ------------------ | ------------------------------- |
+| `$GATES_LINT_CMD` | lint ゲート        | `GATES_LINT_CMD="eslint ."`     |
+| `$GATES_TYPE_CMD` | type-check         | `GATES_TYPE_CMD="tsc --noEmit"` |
+| `$GATES_UNIT_CMD` | test ゲート        | `GATES_UNIT_CMD="vitest run"`   |
+| `$GATES_TEST_CMD` | 全スクリプトゲート | 単一ゲートモード                |
 
-`$TEST_CMD` を設定すると、スクリプトゲートの検出がスキップされ、指定されたコマンドのみ実行されます（completion-gate.shとの後方互換）。
+`$GATES_TEST_CMD` を設定すると、スクリプトゲートの検出がスキップされ、指定されたコマンドのみ実行されます。`GATES_` プレフィックスにより、無関係な CI やプロジェクトの変数（例: 無印の `TEST_CMD=jest`）との衝突を防ぎます。
 
 ### 設定ファイルの解決
 
