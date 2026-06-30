@@ -119,6 +119,7 @@ fn is_package_dir(dir: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::test_utils::TempDir;
+    use crate::tools::run_graph_gates;
     use std::fs;
 
     #[test]
@@ -265,7 +266,7 @@ mod tests {
         let root = ProjectInfo::detect(&tmp);
         // The git root owns no `src/`, so a root-anchored run skips the gate —
         // documenting the pre-fix behavior the bug report describes.
-        let at_root = crate::tools::run_graph_gates(&root, true, false, None);
+        let at_root = run_graph_gates(&root, true, false, None);
         assert!(
             at_root[0].is_skipped(),
             "the container root has no src/, so a root-anchored circular run skips"
@@ -275,7 +276,7 @@ mod tests {
         let detected = root
             .package_targets()
             .iter()
-            .flat_map(|t| crate::tools::run_graph_gates(t, true, false, None))
+            .flat_map(|t| run_graph_gates(t, true, false, None))
             .any(|r| r.is_failure());
         assert!(
             detected,
