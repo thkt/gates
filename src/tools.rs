@@ -404,10 +404,15 @@ fn analyze_files_on_deep_stack(files: &[PathBuf]) -> litmus::AnalysisResult {
 }
 
 pub fn run_litmus(project: &ProjectInfo) -> Vec<ToolResult> {
-    if !project.has_package_json {
-        return vec![ToolResult::skipped("litmus")];
-    }
-
+    // Guard on whether there is anything to analyze — non-empty `find_test_files`
+    // — not on a root `package.json`. litmus runs once at the root and
+    // `find_test_files` recurses into members (excluding node_modules), so a
+    // single root run covers a monorepo's packages; that recursion is why litmus
+    // stays off the per-package fan-out (#104). A root-only `has_package_json`
+    // guard diverged from that real precondition: a root-manifest-less layout
+    // (members own the manifests) skipped every test despite owning real ones
+    // (#106). The test-file walk is the actual precondition, so let its emptiness
+    // be the skip condition.
     let files = litmus::find_test_files(&project.root);
     if files.is_empty() {
         return vec![ToolResult::skipped("litmus")];
@@ -1551,10 +1556,52 @@ mod tests {
     }
 
     #[test]
-    fn litmus_skips_without_package_json() {
-        let project = test_project(false, false);
+    fn litmus_skips_when_tree_has_no_tests_even_without_a_manifest() {
+        // No test files anywhere (and no manifest): litmus has nothing to analyze
+        // and skips. The skip is driven by the empty test-file walk, not by the
+        // absent root manifest (#106) — a tree with member tests would run.
+        let tmp = TempDir::new("litmus-no-manifest");
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: false,
+            has_tsconfig: false,
+        };
         let result = run_litmus(&project);
         assert!(result.iter().any(ToolResult::is_skipped));
+    }
+
+    // Bug reproduction (#106): a root-manifest-less monorepo — no root
+    // package.json, the manifests live in members — owns real test files inside a
+    // package. litmus runs once at the root and `find_test_files` recurses into
+    // the member, so the tautological test must surface. Before the fix the
+    // root-only `has_package_json` guard skipped the whole run, a false pass.
+    #[test]
+    fn litmus_analyzes_member_tests_in_root_manifest_less_monorepo() {
+        let tmp = TempDir::new("litmus-rootless");
+        let pkg = tmp.join("packages/app");
+        fs::create_dir_all(pkg.join("src")).unwrap();
+        fs::write(pkg.join("package.json"), "{}").unwrap();
+        fs::write(
+            pkg.join("src/example.test.ts"),
+            r"
+import { test, expect } from 'vitest';
+test('works', () => {
+    expect(true).toBe(true);
+});
+",
+        )
+        .unwrap();
+        // The root owns no package.json; the member holds the manifest and tests.
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: false,
+            has_tsconfig: false,
+        };
+        let result = run_litmus(&project);
+        assert!(
+            result.iter().any(ToolResult::is_failure),
+            "tautological member test must block despite the root owning no manifest: {result:?}"
+        );
     }
 
     #[test]
