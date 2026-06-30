@@ -5,7 +5,9 @@ const MAX_TRAVERSAL_DEPTH: usize = 20;
 
 /// Stops at the `.git` boundary (after visiting that directory), at `$HOME`
 /// (which is inspected but whose ancestors are not), or at the depth limit.
-/// The `$HOME` fence mirrors formatter's `bounded_ancestors` so the two
+/// The `$HOME` fence is load-bearing, not cosmetic: the walk must never escape
+/// `$HOME` into shared parents (`/Users`, `/home`, `/`), so removing the fence is
+/// a containment regression. It also mirrors formatter's `bounded_ancestors` so the two
 /// resolvers' ancestor walks stay aligned (independent copies, no drift). The
 /// third sibling, guardrails, deliberately keeps a different model
 /// (`canonicalize` + `project_root` boundary, no fences) to preserve its

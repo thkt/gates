@@ -149,10 +149,13 @@ impl EnvOverrides {
 
     /// Reads the command overrides through an injected getter so tests can
     /// exercise the env-name contract without mutating process-global state
-    /// (`env::set_var` is `unsafe`, which this crate forbids). Override names
-    /// carry the `GATES_` prefix to avoid colliding with unrelated CI/project
-    /// vars (a bare `TEST_CMD=jest` would otherwise silently hijack the gate);
-    /// no bare fallback is read, so the collision cannot reappear (#95).
+    /// (`env::set_var` is `unsafe`, which this crate forbids). Gate *command*
+    /// overrides carry the `GATES_` prefix to avoid colliding with unrelated
+    /// CI/project vars (a bare `TEST_CMD=jest` would otherwise silently hijack
+    /// the gate); no bare fallback is read, so the collision cannot reappear
+    /// (#95). The prefix rule is scoped to these command overrides only —
+    /// standard vars (`HOME`, `XDG_DATA_HOME`, `NO_COLOR`) are still read bare by
+    /// design, since they carry no gate-specific collision risk.
     fn from_env_with(get: impl Fn(&str) -> Option<String>) -> Self {
         let cmd = |key: &str| get(key).filter(|s| !s.is_empty());
         Self {
