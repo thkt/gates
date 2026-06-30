@@ -13,7 +13,11 @@ path = "src/main.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = ">=1"
 regex = ">=1"
-litmus = { git = "https://github.com/thkt/litmus.git" }
+# litmus is a first-party git dependency with no semver releases. A bare git dep
+# floats to the default-branch HEAD on `cargo update`, which is a stability hazard
+# for a per-edit hook, so pin it by rev. The registry crates below (oxc/serde/regex)
+# stay on `>=` ranges; pinning those floats is tracked separately, out of #94 scope.
+litmus = { git = "https://github.com/thkt/litmus.git", rev = "4ee5b6a6875ba6e7dfa210fc6b98cbc528603272" }
 oxc_allocator = ">=0.121"
 oxc_ast = { version = ">=0.121", features = ["serialize"] }
 oxc_parser = ">=0.121"

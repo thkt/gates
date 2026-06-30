@@ -164,10 +164,7 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
 
     if config.is_enabled("litmus") {
         let p = project.clone();
-        tasks.push((
-            vec!["litmus"],
-            thread::spawn(move || vec![tools::run_litmus(&p)]),
-        ));
+        tasks.push((vec!["litmus"], thread::spawn(move || tools::run_litmus(&p))));
     }
 
     if circular_enabled || coupling_enabled {
