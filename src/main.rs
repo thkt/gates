@@ -134,7 +134,7 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
         .filter(|(_, g)| config.is_enabled(g.name))
         .collect();
 
-    // Legacy mode: $TEST_CMD set → single gate, skip script detection
+    // Single-gate mode: $GATES_TEST_CMD set → one gate, skip script detection
     let script_gates: Vec<_> = if let Some(ref test_cmd) = overrides.test_cmd {
         vec![tools::ScriptGate {
             name: "test",

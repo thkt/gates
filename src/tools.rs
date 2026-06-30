@@ -127,11 +127,22 @@ pub struct EnvOverrides {
 
 impl EnvOverrides {
     pub fn from_env() -> Self {
+        Self::from_env_with(|key| env::var(key).ok())
+    }
+
+    /// Reads the command overrides through an injected getter so tests can
+    /// exercise the env-name contract without mutating process-global state
+    /// (`env::set_var` is `unsafe`, which this crate forbids). Override names
+    /// carry the `GATES_` prefix to avoid colliding with unrelated CI/project
+    /// vars (a bare `TEST_CMD=jest` would otherwise silently hijack the gate);
+    /// no bare fallback is read, so the collision cannot reappear (#95).
+    fn from_env_with(get: impl Fn(&str) -> Option<String>) -> Self {
+        let cmd = |key: &str| get(key).filter(|s| !s.is_empty());
         Self {
-            lint_cmd: env::var("LINT_CMD").ok().filter(|s| !s.is_empty()),
-            type_cmd: env::var("TYPE_CMD").ok().filter(|s| !s.is_empty()),
-            unit_cmd: env::var("UNIT_CMD").ok().filter(|s| !s.is_empty()),
-            test_cmd: env::var("TEST_CMD").ok().filter(|s| !s.is_empty()),
+            lint_cmd: cmd("GATES_LINT_CMD"),
+            type_cmd: cmd("GATES_TYPE_CMD"),
+            unit_cmd: cmd("GATES_UNIT_CMD"),
+            test_cmd: cmd("GATES_TEST_CMD"),
             audit_dir: audit::default_dir(),
             snapshot_dir: audit::default_dir().map(|d| d.join("snapshots")),
         }
@@ -874,6 +885,41 @@ mod tests {
 
     fn no_overrides() -> EnvOverrides {
         EnvOverrides::default()
+    }
+
+    #[test]
+    fn from_env_reads_gates_prefixed_names() {
+        let overrides = EnvOverrides::from_env_with(|key| match key {
+            "GATES_LINT_CMD" => Some("gates-lint".into()),
+            "GATES_TYPE_CMD" => Some("gates-type".into()),
+            "GATES_UNIT_CMD" => Some("gates-unit".into()),
+            "GATES_TEST_CMD" => Some("gates-test".into()),
+            _ => None,
+        });
+        assert_eq!(overrides.lint_cmd.as_deref(), Some("gates-lint"));
+        assert_eq!(overrides.type_cmd.as_deref(), Some("gates-type"));
+        assert_eq!(overrides.unit_cmd.as_deref(), Some("gates-unit"));
+        assert_eq!(overrides.test_cmd.as_deref(), Some("gates-test"));
+    }
+
+    #[test]
+    fn from_env_ignores_bare_unprefixed_names() {
+        // A bare `TEST_CMD=jest` from unrelated CI must not hijack the gate (#95).
+        let overrides = EnvOverrides::from_env_with(|key| match key {
+            "LINT_CMD" | "TYPE_CMD" | "UNIT_CMD" | "TEST_CMD" => Some("hijack".into()),
+            _ => None,
+        });
+        assert_eq!(overrides.lint_cmd, None);
+        assert_eq!(overrides.type_cmd, None);
+        assert_eq!(overrides.unit_cmd, None);
+        assert_eq!(overrides.test_cmd, None);
+    }
+
+    #[test]
+    fn from_env_filters_empty_override_to_none() {
+        let overrides =
+            EnvOverrides::from_env_with(|key| (key == "GATES_LINT_CMD").then(String::new));
+        assert_eq!(overrides.lint_cmd, None);
     }
 
     const NPM: Option<&str> = Some("npm run");
