@@ -26,6 +26,12 @@ pub struct GateDefinition {
     pub args: &'static [&'static str],
     pub hint: &'static str,
     pub condition: fn(&ProjectInfo) -> bool,
+    /// Whether this gate fans out over the discovered package targets. A
+    /// tsconfig-anchored gate (tsgo, oxlint) must run inside the package that
+    /// owns the config, so in a monorepo container it runs once per member
+    /// (#102). A workspace-aware or config-driven gate (knip, depcruise) reads
+    /// the whole tree from the root in one pass, so it stays root-anchored.
+    pub per_package: bool,
 }
 
 pub struct InstallInfo {
@@ -67,6 +73,9 @@ pub const GATES: &[GateDefinition] = &[
         args: &[],
         hint: "Remove unused exports and dependencies.",
         condition: |p| p.has_package_json,
+        // knip reads workspaces from the root manifest and resolves every member
+        // in a single pass, so a per-package fan-out would double-report.
+        per_package: false,
     },
     GateDefinition {
         name: "tsgo",
@@ -74,6 +83,9 @@ pub const GATES: &[GateDefinition] = &[
         args: &[],
         hint: "Fix type errors.",
         condition: |p| p.has_tsconfig,
+        // tsgo type-checks the tsconfig in its working directory, so in a
+        // monorepo container it must run inside each package that owns one.
+        per_package: true,
     },
     // Type-aware lint (backend: tsgolint). `--max-warnings 0` promotes oxlint's
     // default-severity findings (type-aware rules emit as warnings) to a nonzero
@@ -86,6 +98,9 @@ pub const GATES: &[GateDefinition] = &[
         args: &["--type-aware", "--max-warnings", "0"],
         hint: "Fix type-aware lint violations (e.g. floating promises).",
         condition: |p| p.has_tsconfig && tsgolint_available(&p.root),
+        // Type-aware lint resolves the tsconfig and tsgolint backend in its
+        // working directory, so like tsgo it fans out per owning package.
+        per_package: true,
     },
     // dependency-cruiser auto-detects .dependency-cruiser.{js,cjs,mjs,json} since v13,
     // so --config is omitted; the condition gates on the same four formats it detects.
@@ -100,6 +115,9 @@ pub const GATES: &[GateDefinition] = &[
                 .iter()
                 .any(|ext| p.root.join(format!(".dependency-cruiser.{ext}")).exists())
         },
+        // dependency-cruiser is config-driven: its `.dependency-cruiser.*` config
+        // sets the scope, so it runs from the root where the config lives.
+        per_package: false,
     },
 ];
 
@@ -1211,6 +1229,7 @@ mod tests {
             args: &[],
             hint: "",
             condition: |_| true,
+            per_package: false,
         };
         let project = test_project(true, true);
         let result = run_gate(&gate, &project);

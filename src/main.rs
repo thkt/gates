@@ -120,6 +120,22 @@ fn join_into(results: &mut Vec<runner::ToolResult>, (fallback, handle): GateTask
     results.extend(runner::join_or_skip(handle.join(), &fallback));
 }
 
+/// Label a per-package result with its directory relative to the project root
+/// so identically-named failures from different packages stay distinguishable
+/// (#102 fan-out). A self-contained project's only target is the root itself,
+/// whose relative path is empty, so it is returned unlabeled — keeping the
+/// output byte-identical to a root-only run for every non-monorepo repo.
+fn scope_result(
+    result: runner::ToolResult,
+    target_root: &Path,
+    project_root: &Path,
+) -> runner::ToolResult {
+    match target_root.strip_prefix(project_root) {
+        Ok(rel) if !rel.as_os_str().is_empty() => result.scoped(&rel.display().to_string()),
+        _ => result,
+    }
+}
+
 fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Option<String> {
     let config = config::GatesConfig::load(project_dir);
 
@@ -128,6 +144,12 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
     }
 
     let project = project::ProjectInfo::detect(project_dir);
+
+    // The package-scoped gates run against these targets. For a self-contained
+    // project this is just `[root]` (today's behavior); for a monorepo container
+    // whose `.git` sits above the real packages it is the discovered members
+    // (#102), so a tsconfig nested one level down is no longer skipped.
+    let targets = project.package_targets();
 
     let enabled: Vec<_> = tools::GATES
         .iter()
@@ -155,11 +177,25 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
     let mut tasks: Vec<GateTask> = Vec::new();
 
     for (idx, gate) in enabled {
-        let p = project.clone();
+        // A per-package gate runs against every discovered target; a
+        // root-anchored gate (knip, depcruise) runs against the root alone.
+        // Both go through one thread that loops its target list, so the spawned
+        // thread count stays one-per-gate regardless of package count.
+        let gate_targets: Vec<project::ProjectInfo> = if gate.per_package {
+            targets.clone()
+        } else {
+            vec![project.clone()]
+        };
+        let root = project.root.clone();
         let name = gate.name;
         tasks.push((
             vec![name],
-            thread::spawn(move || vec![tools::run_gate(&tools::GATES[idx], &p)]),
+            thread::spawn(move || {
+                gate_targets
+                    .iter()
+                    .map(|t| scope_result(tools::run_gate(&tools::GATES[idx], t), &t.root, &root))
+                    .collect()
+            }),
         ));
     }
 
@@ -169,7 +205,10 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
     }
 
     if circular_enabled || coupling_enabled {
-        let p = project.clone();
+        // circular/coupling read each package's own `src/` dependency graph, so
+        // they fan out over the same targets and build one graph per package.
+        let graph_targets = targets.clone();
+        let root = project.root.clone();
         let ca_threshold = config.coupling.ca_threshold;
         let mut fallback = Vec::new();
         if circular_enabled {
@@ -181,7 +220,15 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
         tasks.push((
             fallback,
             thread::spawn(move || {
-                tools::run_graph_gates(&p, circular_enabled, coupling_enabled, ca_threshold)
+                graph_targets
+                    .iter()
+                    .flat_map(|t| {
+                        tools::run_graph_gates(t, circular_enabled, coupling_enabled, ca_threshold)
+                            .into_iter()
+                            .map(|r| scope_result(r, &t.root, &root))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
             }),
         ));
     }
@@ -1310,5 +1357,166 @@ mod tests {
     #[test]
     fn usage_errors_use_ex_usage_64() {
         assert_eq!(ex_usage(), 64);
+    }
+
+    // #102: a monorepo container (root holds the workspace manifest but owns no
+    // `src/` or `tsconfig.json`) must fan a per-package table gate out into the
+    // member that owns the config. tsgo, anchored at the git root today, would
+    // see no root tsconfig and skip; the fan-out runs it inside `packages/app`
+    // and labels the failure with that package so it is attributable.
+    #[test]
+    fn tsgo_fans_out_into_nested_package_and_labels_scope() {
+        let tmp = setup_project(r#"{"gates":{"tsgo":true}}"#, &["package.json"]);
+        let pkg = tmp.join("packages/app");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("package.json"), "{}").unwrap();
+        fs::write(pkg.join("tsconfig.json"), "{}").unwrap();
+        // A fake tsgo that exits nonzero, resolved from the package's own
+        // node_modules/.bin since the gate runs with the package as its root.
+        test_utils::link_fake_bin(&pkg, "tsgo", "knip-unused-export");
+
+        let block = run_with_overrides(
+            &tmp,
+            &tools::EnvOverrides {
+                audit_dir: Some(tmp.join("audit")),
+                ..Default::default()
+            },
+        )
+        .expect("the nested package's tsgo failure must block");
+        let plain = color::strip_ansi(&block);
+        assert!(
+            plain.contains("tsgo"),
+            "tsgo must fire in the package: {plain}"
+        );
+        assert!(
+            plain.contains("[packages/app]"),
+            "the failure must be labeled with the owning package: {plain}"
+        );
+    }
+
+    // #102 companion for the graph gates: circular reads each package's own
+    // `src/` graph, so in a container it fans out and detects a cycle living
+    // inside `packages/app/src` that a root-anchored run (no root `src/`) skips.
+    #[test]
+    fn circular_fans_out_into_nested_package_and_labels_scope() {
+        let tmp = setup_project(r#"{"gates":{"circular":true}}"#, &["package.json"]);
+        let src = tmp.join("packages/app/src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(tmp.join("packages/app/package.json"), "{}").unwrap();
+        fs::write(
+            src.join("a.ts"),
+            "import { b } from './b';\nexport const a = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            src.join("b.ts"),
+            "import { a } from './a';\nexport const b = 2;\n",
+        )
+        .unwrap();
+
+        let block = run_with_overrides(
+            &tmp,
+            &tools::EnvOverrides {
+                audit_dir: Some(tmp.join("audit")),
+                ..Default::default()
+            },
+        )
+        .expect("the nested cycle must block");
+        let plain = color::strip_ansi(&block);
+        assert!(
+            plain.contains("circular"),
+            "the circular gate must fire: {plain}"
+        );
+        assert!(
+            plain.contains("[packages/app]"),
+            "the failure must be labeled with the owning package: {plain}"
+        );
+    }
+
+    // #102 multi-member case: two sibling packages each own a cycle. The
+    // fan-out must discover both, run the graph gate per member, and label each
+    // failure with its own package so the two `circular` blocks are
+    // distinguishable instead of colliding under one unlabeled header. This is
+    // the scenario `scoped` and the `dirs.sort()` ordering exist for; the
+    // single-member tests above never exercise the disambiguation.
+    #[test]
+    fn circular_fans_out_into_two_members_labeling_each() {
+        let tmp = setup_project(r#"{"gates":{"circular":true}}"#, &["package.json"]);
+        for member in ["a", "b"] {
+            let src = tmp.join(format!("packages/{member}/src"));
+            fs::create_dir_all(&src).unwrap();
+            fs::write(tmp.join(format!("packages/{member}/package.json")), "{}").unwrap();
+            fs::write(
+                src.join("a.ts"),
+                "import { b } from './b';\nexport const a = 1;\n",
+            )
+            .unwrap();
+            fs::write(
+                src.join("b.ts"),
+                "import { a } from './a';\nexport const b = 2;\n",
+            )
+            .unwrap();
+        }
+
+        let block = run_with_overrides(
+            &tmp,
+            &tools::EnvOverrides {
+                audit_dir: Some(tmp.join("audit")),
+                ..Default::default()
+            },
+        )
+        .expect("both nested cycles must block");
+        let plain = color::strip_ansi(&block);
+        assert!(
+            plain.contains("[packages/a]"),
+            "member a's failure must be labeled: {plain}"
+        );
+        assert!(
+            plain.contains("[packages/b]"),
+            "member b's failure must be labeled: {plain}"
+        );
+        assert_eq!(
+            plain.matches("✗ circular").count(),
+            2,
+            "each member must render its own circular block: {plain}"
+        );
+    }
+
+    // The self-contained-root invariant at the orchestration layer: a project
+    // that owns its own `src/` runs the graph gate at the root and emits no
+    // package label, so output stays byte-identical to the pre-#102 behavior.
+    #[test]
+    fn self_contained_root_failure_carries_no_scope_label() {
+        let tmp = setup_project(r#"{"gates":{"circular":true}}"#, &["package.json"]);
+        let src = tmp.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("a.ts"),
+            "import { b } from './b';\nexport const a = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            src.join("b.ts"),
+            "import { a } from './a';\nexport const b = 2;\n",
+        )
+        .unwrap();
+
+        let block = run_with_overrides(
+            &tmp,
+            &tools::EnvOverrides {
+                audit_dir: Some(tmp.join("audit")),
+                ..Default::default()
+            },
+        )
+        .expect("the root cycle must block");
+        let plain = color::strip_ansi(&block);
+        assert!(
+            plain.contains("circular"),
+            "the circular gate must fire: {plain}"
+        );
+        assert!(
+            !plain.contains('['),
+            "a self-contained root must not label its output: {plain}"
+        );
     }
 }

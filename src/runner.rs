@@ -85,6 +85,24 @@ impl ToolResult {
             GateOutcome::Passed | GateOutcome::Skipped => "",
         }
     }
+
+    /// Prefix a package label onto the failure/warning output so per-package
+    /// gate runs in a monorepo container stay distinguishable: two packages
+    /// that each fail `circular` render the same `✗ circular` header, and their
+    /// bodies are path-relative to each package's own `src/`, so without the
+    /// label they collide. Passing/Skipped results carry no output and are
+    /// returned unchanged. The label is added only at the fan-out site when the
+    /// target is a discovered package, so a self-contained root (the single
+    /// target equals the project root) is never labeled and its output is
+    /// byte-identical to a root-only run.
+    pub fn scoped(mut self, label: &str) -> Self {
+        self.outcome = match self.outcome {
+            GateOutcome::Failed(text) => GateOutcome::Failed(format!("[{label}]\n{text}")),
+            GateOutcome::Warned(text) => GateOutcome::Warned(format!("[{label}]\n{text}")),
+            other => other,
+        };
+        self
+    }
 }
 
 fn kill_process_group(pid: u32) {
