@@ -28,10 +28,11 @@ decision-makers: [thkt]
 
 Chosen option: `ProjectInfo::package_targets` (project.rs:68-79) returns the directories the package-scoped gates run against, by an either/or discriminator. When the git root directly owns analyzable code (`has_tsconfig` or a root `src/`), the root is the sole target — today's behavior, so every non-monorepo repo is unchanged. Otherwise the root is a container and discovery descends (bounded `MAX_PACKAGE_DEPTH = 4`, excluding dependency/build dirs) to the member directories that own a `package.json` or `tsconfig.json`, stopping descent once a package matches so a member's own fixtures are not promoted to separate targets (project.rs:90-116). The root and the members are never both run — union would double-report.
 
-Exactly four gates fan out, selected by where their scope is anchored:
+Exactly five gates fan out, selected by where their scope is anchored:
 
 - tsgo, oxlint — anchored on the in-directory `tsconfig.json`, marked `per_package: true` (tools.rs:88, 103). They run once per member that owns a tsconfig; a member without one self-skips via the existing `condition`.
 - circular, coupling — read each member's own `src/` dependency graph, fanned out in `run_with_overrides` (main.rs:207-231) building one graph per member.
+- clone — reads each member's own `src/` tree for structural clones, fanned out in `run_with_overrides` (main.rs:236-263) analyzing one tree per member (#105, the same root-only skip as #102 but missed by that fan-out).
 
 Three gates stay root-anchored: knip resolves workspaces from the root manifest in one pass, depcruise is config-driven, and litmus already uses a recursive `**/*.test.ts` glob from the root (tools.rs:390) that covers every member, so per-package would double-report.
 
