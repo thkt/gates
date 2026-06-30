@@ -8,12 +8,14 @@ use crate::resolve;
 use crate::runner::{
     GATE_TIMEOUT, GateOutcome, ToolResult, join_or_skip, run_command, run_command_with_label,
 };
+use litmus::rules::{Issue, Severity};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io;
 use std::iter;
+use std::panic::resume_unwind;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::process::Command;
@@ -330,33 +332,109 @@ pub fn gate_by_name(name: &str) -> &'static GateDefinition {
         .unwrap_or_else(|| panic!("gate '{name}' not found"))
 }
 
-pub fn run_litmus(project: &ProjectInfo) -> ToolResult {
+// litmus calibrates its parser's stack headroom against this size: its CLI runs
+// `analyze_files` on a 256MiB worker (litmus `ANALYZER_STACK_SIZE`, src/main.rs).
+// The library path we use here would otherwise run on a default ~2MiB gate thread,
+// where right-associative forms with no brackets to bound recursion (`a=b=c`,
+// ternary alternate, `**`, prefix-unary) overflow far sooner than litmus expects.
+// Mirroring the size lifts the overflow floor to litmus's ~250k-level parity.
+//
+// This is probability reduction, not containment: a deeper overflow still aborts
+// via SIGABRT, which is signal death that `join_or_skip` cannot catch and which
+// takes the whole gates process down with it. True isolation needs a subprocess
+// or an upstream litmus `analyze_files_isolated` entry (out of #94 scope).
+//
+// The value duplicates litmus's unexported `ANALYZER_STACK_SIZE`, which litmus
+// couples to its `BRACKET_DEPTH_LIMIT`; re-verify this number whenever the pinned
+// litmus rev (Cargo.toml) is bumped.
+const ANALYZER_STACK_SIZE: usize = 256 * 1024 * 1024;
+
+/// Run `litmus::analyze_files` on a thread with `ANALYZER_STACK_SIZE`, matching
+/// litmus's own worker so the library path has the same overflow floor as its CLI.
+/// A child panic is re-raised on the caller so the gate thread's `join_or_skip`
+/// still degrades it to skipped (fail-open). If the thread cannot be spawned we
+/// fall back to an inline call, mirroring litmus's main-thread fallback.
+fn analyze_files_on_deep_stack(files: &[PathBuf]) -> litmus::AnalysisResult {
+    thread::scope(|scope| {
+        match thread::Builder::new()
+            .stack_size(ANALYZER_STACK_SIZE)
+            .spawn_scoped(scope, || litmus::analyze_files(files))
+        {
+            Ok(handle) => match handle.join() {
+                Ok(result) => result,
+                Err(payload) => resume_unwind(payload),
+            },
+            Err(error) => {
+                eprintln!("gates: litmus deep-stack thread spawn failed, running inline: {error}");
+                litmus::analyze_files(files)
+            }
+        }
+    })
+}
+
+pub fn run_litmus(project: &ProjectInfo) -> Vec<ToolResult> {
     if !project.has_package_json {
-        return ToolResult::skipped("litmus");
+        return vec![ToolResult::skipped("litmus")];
     }
 
     let files = litmus::find_test_files(&project.root);
     if files.is_empty() {
-        return ToolResult::skipped("litmus");
+        return vec![ToolResult::skipped("litmus")];
     }
 
-    let result = litmus::analyze_files(&files);
+    let result = analyze_files_on_deep_stack(&files);
 
     for error in &result.errors {
         eprintln!("gates: {error}");
     }
 
     if result.issues.is_empty() {
-        return ToolResult::passed("litmus");
+        return vec![ToolResult::passed("litmus")];
     }
 
-    let output: Vec<String> = result.issues.iter().map(ToString::to_string).collect();
+    // litmus tags dummy-data / missing-act / snapshot-external as advisory
+    // (`Severity::Warning`, exit 1 in its CLI) and everything else as blocking
+    // (exit 2). Route each tier to gates' matching outcome so warnings reach the
+    // human without blocking the AI, and surface both when they co-occur rather
+    // than letting a blocking result swallow the warnings (gates can emit more
+    // than one result per gate, e.g. run_graph_gates).
+    // Match exhaustively rather than `== Severity::Warning`: `Severity` is not
+    // `#[non_exhaustive]`, so a future litmus variant breaks compilation here and
+    // forces a deliberate routing choice, instead of silently defaulting to the
+    // blocking bucket and blocking the AI against gates' fail-open posture.
+    let (warnings, blocking): (Vec<_>, Vec<_>) =
+        result
+            .issues
+            .iter()
+            .partition(|issue| match issue.severity() {
+                Severity::Warning => true,
+                Severity::Blocking => false,
+            });
 
-    ToolResult::failed(
-        "litmus",
-        "Fix test quality issues (weak assertions, mock overuse, tautological tests).",
-        &output.join("\n"),
-    )
+    let render = |issues: &[&Issue]| {
+        issues
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let mut results = Vec::new();
+    if !blocking.is_empty() {
+        results.push(ToolResult::failed(
+            "litmus",
+            "Fix test quality issues (weak assertions, mock overuse, tautological tests).",
+            &render(&blocking),
+        ));
+    }
+    if !warnings.is_empty() {
+        results.push(ToolResult::warned(
+            "litmus",
+            "Advisory test-quality warnings (litmus warning tier); not blocking.",
+            &render(&warnings),
+        ));
+    }
+    results
 }
 
 /// Build the dependency graph once and run the circular and coupling gates that
@@ -1414,7 +1492,7 @@ mod tests {
     fn litmus_skips_without_package_json() {
         let project = test_project(false, false);
         let result = run_litmus(&project);
-        assert!(result.is_skipped());
+        assert!(result.iter().any(ToolResult::is_skipped));
     }
 
     #[test]
@@ -1427,7 +1505,7 @@ mod tests {
             has_tsconfig: false,
         };
         let result = run_litmus(&project);
-        assert!(result.is_skipped());
+        assert!(result.iter().any(ToolResult::is_skipped));
     }
 
     #[test]
@@ -1455,9 +1533,8 @@ describe('math', () => {
         };
         let result = run_litmus(&project);
         assert!(
-            !result.is_failure(),
-            "good test should pass: {:?}",
-            result.outcome
+            !result.iter().any(ToolResult::is_failure),
+            "good test should pass: {result:?}"
         );
     }
 
@@ -1481,8 +1558,97 @@ test('works', () => {
             has_tsconfig: false,
         };
         let result = run_litmus(&project);
-        assert!(result.is_failure(), "tautological test should fail");
-        assert!(result.output().contains("tautological"));
+        assert!(
+            result.iter().any(ToolResult::is_failure),
+            "tautological test should fail"
+        );
+        assert!(
+            !result.iter().any(ToolResult::is_warning),
+            "no warning tier"
+        );
+        let blocking_output: String = result
+            .iter()
+            .filter(|r| r.is_failure())
+            .map(ToolResult::output)
+            .collect();
+        assert!(blocking_output.contains("tautological"));
+    }
+
+    #[test]
+    fn litmus_warns_without_blocking_on_warning_tier() {
+        // dummy-data is a warning-tier rule (advisory, exit 1 in litmus' CLI):
+        // the test exercises a real act yet feeds placeholder "foo"/"FOO" data.
+        let tmp = TempDir::new("litmus-warn");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        fs::write(
+            tmp.join("warn.test.ts"),
+            r#"
+import { test, expect } from 'vitest';
+test("uppercases the provided first name", () => {
+    const result = normalize("foo");
+    expect(result).toBe("FOO");
+});
+"#,
+        )
+        .unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_litmus(&project);
+        assert!(
+            result.iter().any(ToolResult::is_warning),
+            "warning-tier issue should warn: {result:?}"
+        );
+        assert!(
+            !result.iter().any(ToolResult::is_failure),
+            "warning-tier issue must not block: {result:?}"
+        );
+    }
+
+    #[test]
+    fn litmus_reports_both_tiers_when_mixed() {
+        // A blocking rule (tautological) and a warning rule (dummy-data) in the
+        // same run must both surface; the blocking result must not swallow the
+        // warning.
+        let tmp = TempDir::new("litmus-mixed");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        fs::write(
+            tmp.join("block.test.ts"),
+            r"
+import { test, expect } from 'vitest';
+test('works', () => {
+    expect(true).toBe(true);
+});
+",
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("warn.test.ts"),
+            r#"
+import { test, expect } from 'vitest';
+test("uppercases the provided first name", () => {
+    const result = normalize("foo");
+    expect(result).toBe("FOO");
+});
+"#,
+        )
+        .unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_litmus(&project);
+        assert!(
+            result.iter().any(ToolResult::is_failure),
+            "mixed run should keep the blocking result: {result:?}"
+        );
+        assert!(
+            result.iter().any(ToolResult::is_warning),
+            "mixed run should keep the warning result: {result:?}"
+        );
     }
 
     fn clone_project(files: &[(&str, &str)]) -> TempDir {
