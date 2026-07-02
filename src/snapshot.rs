@@ -90,7 +90,7 @@ fn collect_targets(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
 ///
 /// Walks `root` for `.ts/.tsx/.cts/.mts/.js/.jsx/.cjs/.mjs` plus every
 /// `package.json` / `tsconfig*.json` (recursive, excluding
-/// `node_modules/.git/dist/build/target/coverage/.next`), feeding
+/// `node_modules/.git/dist/build/target/coverage/.next/.claude`), feeding
 /// (relative path, size, ctime secs, ctime nsecs) of each into a
 /// `DefaultHasher`. ctime is used over content bytes because the kernel bumps it
 /// on any inode write and userspace cannot backdate it (`utimes` touches only

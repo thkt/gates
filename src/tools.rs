@@ -99,13 +99,15 @@ pub const GATES: &[GateDefinition] = &[
         // descends hidden sibling dirs, so `.claude/plugins/<plugin>` sources
         // would be linted in a self-contained repo (cwd == root). `.gitignore`
         // suppresses them only when the repo ignores `.claude`, so exclude them
-        // unconditionally, matching the discovery/snapshot/jscpd exclusions.
+        // unconditionally. The `**/` prefix matches `.claude` at any depth, giving
+        // the same coverage as the jscpd (`**/.claude/**`) and Rust-walker
+        // (basename match) exclusions rather than only a cwd-level `.claude`.
         args: &[
             "--type-aware",
             "--max-warnings",
             "0",
             "--ignore-pattern",
-            ".claude/**",
+            "**/.claude/**",
         ],
         hint: "Fix type-aware lint violations (e.g. floating promises).",
         condition: |p| p.has_tsconfig && tsgolint_available(&p.root),
@@ -1400,8 +1402,8 @@ mod tests {
     fn oxlint_definition_uses_type_aware_without_type_check() {
         // Locks the exit-code contract: --max-warnings 0 makes warnings block, and
         // --type-check is omitted so type errors are not double-reported with tsgo.
-        // --ignore-pattern .claude/** keeps third-party plugin sources out of the
-        // cwd-anchored file walk in a self-contained repo.
+        // --ignore-pattern **/.claude/** keeps third-party plugin sources out of
+        // the file walk at any depth in a self-contained repo.
         let gate = gate_by_name("oxlint");
         assert_eq!(gate.command, "oxlint");
         assert_eq!(
@@ -1411,7 +1413,7 @@ mod tests {
                 "--max-warnings",
                 "0",
                 "--ignore-pattern",
-                ".claude/**"
+                "**/.claude/**"
             ]
         );
     }
