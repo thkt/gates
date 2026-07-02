@@ -95,7 +95,18 @@ pub const GATES: &[GateDefinition] = &[
     GateDefinition {
         name: "oxlint",
         command: "oxlint",
-        args: &["--type-aware", "--max-warnings", "0"],
+        // No path arg: oxlint discovers files from its cwd. Its default walk
+        // descends hidden sibling dirs, so `.claude/plugins/<plugin>` sources
+        // would be linted in a self-contained repo (cwd == root). `.gitignore`
+        // suppresses them only when the repo ignores `.claude`, so exclude them
+        // unconditionally, matching the discovery/snapshot/jscpd exclusions.
+        args: &[
+            "--type-aware",
+            "--max-warnings",
+            "0",
+            "--ignore-pattern",
+            ".claude/**",
+        ],
         hint: "Fix type-aware lint violations (e.g. floating promises).",
         condition: |p| p.has_tsconfig && tsgolint_available(&p.root),
         // Type-aware lint resolves the tsconfig and tsgolint backend in its
@@ -646,9 +657,13 @@ pub const DEFAULT_JSCPD_THRESHOLD: f64 = 10.0;
 /// would otherwise blow the gate's timeout). jscpd's own docs use this glob.
 /// `.git` is not covered by gitignore (it is the git dir itself); its sample
 /// hooks are near-identical and would surface as clone groups, so exclude it.
+/// `.claude` holds Claude Code tooling (plugin sources) that is third-party and
+/// not first-party code to gate; it is excluded here for repos that do not
+/// gitignore it, mirroring the package-discovery/snapshot exclusions.
 pub const DEFAULT_JSCPD_IGNORE: &[&str] = &[
     "**/node_modules/**",
     "**/.git/**",
+    "**/.claude/**",
     "**/*.test.*",
     "**/*.spec.*",
     "**/generated/**",
@@ -933,6 +948,16 @@ mod tests {
         assert_eq!(overrides.type_cmd, None);
         assert_eq!(overrides.unit_cmd, None);
         assert_eq!(overrides.test_cmd, None);
+    }
+
+    #[test]
+    fn default_jscpd_ignore_excludes_claude_dir() {
+        // `.claude` plugin sources are third-party tooling; the default ignore
+        // must keep them out of clone detection so they never surface as groups.
+        assert!(
+            DEFAULT_JSCPD_IGNORE.contains(&"**/.claude/**"),
+            "DEFAULT_JSCPD_IGNORE must exclude .claude by default"
+        );
     }
 
     #[test]
@@ -1375,9 +1400,20 @@ mod tests {
     fn oxlint_definition_uses_type_aware_without_type_check() {
         // Locks the exit-code contract: --max-warnings 0 makes warnings block, and
         // --type-check is omitted so type errors are not double-reported with tsgo.
+        // --ignore-pattern .claude/** keeps third-party plugin sources out of the
+        // cwd-anchored file walk in a self-contained repo.
         let gate = gate_by_name("oxlint");
         assert_eq!(gate.command, "oxlint");
-        assert_eq!(gate.args, &["--type-aware", "--max-warnings", "0"]);
+        assert_eq!(
+            gate.args,
+            &[
+                "--type-aware",
+                "--max-warnings",
+                "0",
+                "--ignore-pattern",
+                ".claude/**"
+            ]
+        );
     }
 
     fn run_circular(project: &ProjectInfo) -> ToolResult {

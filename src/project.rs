@@ -3,9 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Directory names package discovery never descends into: dependencies, VCS,
-/// build output, and coverage/next caches cannot own a first-party package
-/// target. Extends the list `depgraph`/`snapshot` apply to their own downward
-/// walks with the cache dirs that commonly hold copied `package.json` fixtures.
+/// build output, coverage/next caches, and Claude Code tooling cannot own a
+/// first-party package target. Extends the list `depgraph`/`snapshot` apply to
+/// their own downward walks with the cache dirs that commonly hold copied
+/// `package.json` fixtures and `.claude`, whose `plugins/<plugin>` members carry
+/// their own manifests but are third-party tooling, not code to gate.
 const EXCLUDED_DIRS: &[&str] = &[
     "node_modules",
     ".git",
@@ -14,6 +16,7 @@ const EXCLUDED_DIRS: &[&str] = &[
     "target",
     "coverage",
     ".next",
+    ".claude",
 ];
 
 /// How many directory levels below the git root package discovery descends. A
@@ -304,6 +307,34 @@ mod tests {
                 .iter()
                 .all(|t| !t.root.starts_with(tmp.join("node_modules"))),
             "node_modules packages must not be discovered as targets"
+        );
+        assert!(
+            targets.iter().any(|t| t.root == pkg),
+            "real packages are still discovered"
+        );
+    }
+
+    // Claude Code tooling directories (`.claude/plugins/<plugin>` carrying their
+    // own `package.json`) are third-party config, not first-party packages, so
+    // discovery must not fan the gates out into them.
+    #[test]
+    fn discovery_skips_claude_dir() {
+        let tmp = TempDir::new("nested-claude");
+        fs::create_dir_all(tmp.join(".git")).unwrap();
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        let plugin = tmp.join(".claude/plugins/some-plugin");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(plugin.join("package.json"), "{}").unwrap();
+        let pkg = tmp.join("packages/app");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("package.json"), "{}").unwrap();
+
+        let targets = ProjectInfo::detect(&tmp).package_targets();
+        assert!(
+            targets
+                .iter()
+                .all(|t| !t.root.starts_with(tmp.join(".claude"))),
+            ".claude packages must not be discovered as targets"
         );
         assert!(
             targets.iter().any(|t| t.root == pkg),
