@@ -8,6 +8,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Fixture for the `project.rs`/`snapshot.rs` EXCLUDED_DIRS consolidation
+/// guard tests. A literal, deliberately not a reference to either production
+/// `EXCLUDED_DIRS` array, so deleting an entry from either array diverges
+/// this expectation from actual behavior and fails the guard test.
+pub const GUARDED_EXCLUDED_DIR_NAMES: &[&str] = &[
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    "target",
+    "coverage",
+    ".next",
+    ".claude",
+];
+
 pub struct TempDir {
     path: PathBuf,
 }
