@@ -18,9 +18,12 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Directories whose contents never belong to the gated fileset. Mirrors
-/// `depgraph::EXCLUDED_DIRS` plus `coverage`/`.next` (test/build artifacts that
-/// gates never lints).
+/// Directories whose contents never belong to the gated fileset: dependencies,
+/// VCS, build/test artifacts (`dist`/`build`/`target`/`coverage`/`.next`), and
+/// `.claude` (Claude Code tooling, whose `plugins/<plugin>` sources are
+/// third-party and are also excluded from package discovery at `project.rs`).
+/// Kept in sync with `project.rs::EXCLUDED_DIRS`; `depgraph`'s list is narrower
+/// because it only walks `src/` downward and never reaches these siblings.
 const EXCLUDED_DIRS: &[&str] = &[
     "node_modules",
     ".git",
@@ -29,6 +32,7 @@ const EXCLUDED_DIRS: &[&str] = &[
     "target",
     "coverage",
     ".next",
+    ".claude",
 ];
 
 /// Source extensions gates consumes (tsc/eslint/embedded gates).
@@ -86,7 +90,7 @@ fn collect_targets(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
 ///
 /// Walks `root` for `.ts/.tsx/.cts/.mts/.js/.jsx/.cjs/.mjs` plus every
 /// `package.json` / `tsconfig*.json` (recursive, excluding
-/// `node_modules/.git/dist/build/target/coverage/.next`), feeding
+/// `node_modules/.git/dist/build/target/coverage/.next/.claude`), feeding
 /// (relative path, size, ctime secs, ctime nsecs) of each into a
 /// `DefaultHasher`. ctime is used over content bytes because the kernel bumps it
 /// on any inode write and userspace cannot backdate it (`utimes` touches only
@@ -275,6 +279,20 @@ mod tests {
         let before = compute_digest(&root);
         fs::create_dir_all(root.join("dist")).unwrap();
         fs::write(root.join("dist/bundle.ts"), "ignored").unwrap();
+        let after = compute_digest(&root);
+        assert_eq!(before, after);
+    }
+
+    // Changes under `.claude/` (Claude Code tooling, e.g. a plugin's source)
+    // do not change the digest, so editing a plugin file never triggers a full
+    // gate re-run for first-party code that did not change.
+    #[test]
+    fn digest_unchanged_on_claude_dir_edit() {
+        let root = TempDir::new("snap-claude");
+        fs::write(root.join("a.ts"), "x").unwrap();
+        let before = compute_digest(&root);
+        fs::create_dir_all(root.join(".claude/plugins/p/src")).unwrap();
+        fs::write(root.join(".claude/plugins/p/src/index.ts"), "ignored").unwrap();
         let after = compute_digest(&root);
         assert_eq!(before, after);
     }
