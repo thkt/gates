@@ -416,17 +416,37 @@ fn analyze_files_on_deep_stack(files: &[PathBuf]) -> litmus::AnalysisResult {
     })
 }
 
+/// Drop every test file that lives under a `.claude` path component.
+///
+/// litmus' own `is_excluded` skips node_modules but not `.claude`, so
+/// `find_test_files` still collects third-party Claude Code plugin tests under
+/// `.claude/plugins/*`. Those are not this project's tests, so analyzing them
+/// surfaces false-positive findings on tooling the repo does not own. Match on a
+/// whole path component equal to `.claude` (mirroring litmus `is_excluded`'s
+/// full-path component match and the project.rs / snapshot.rs / jscpd / oxlint
+/// `.claude` convention) so `foo.claude` and the like are not swept up.
+fn without_claude_tests(files: Vec<PathBuf>) -> Vec<PathBuf> {
+    files
+        .into_iter()
+        .filter(|path| {
+            !path
+                .components()
+                .any(|c| c.as_os_str().to_str() == Some(".claude"))
+        })
+        .collect()
+}
+
 pub fn run_litmus(project: &ProjectInfo) -> Vec<ToolResult> {
-    // Guard on whether there is anything to analyze — non-empty `find_test_files`
-    // — not on a root `package.json`. litmus runs once at the root and
-    // `find_test_files` recurses into members (excluding node_modules), so a
-    // single root run covers a monorepo's packages; that recursion is why litmus
-    // stays off the per-package fan-out (#104). A root-only `has_package_json`
-    // guard diverged from that real precondition: a root-manifest-less layout
-    // (members own the manifests) skipped every test despite owning real ones
-    // (#106). The test-file walk is the actual precondition, so let its emptiness
-    // be the skip condition.
-    let files = litmus::find_test_files(&project.root);
+    // Guard on whether there is anything to analyze — the test-file walk after
+    // excluding `.claude` tooling — not on a root `package.json`. litmus runs
+    // once at the root and `find_test_files` recurses into members (excluding
+    // node_modules), so a single root run covers a monorepo's packages; that
+    // recursion is why litmus stays off the per-package fan-out (#104). A
+    // root-only `has_package_json` guard diverged from that real precondition: a
+    // root-manifest-less layout (members own the manifests) skipped every test
+    // despite owning real ones (#106). The `.claude`-excluded test-file walk is
+    // the actual precondition, so let its emptiness be the skip condition.
+    let files = without_claude_tests(litmus::find_test_files(&project.root));
     if files.is_empty() {
         return vec![ToolResult::skipped("litmus")];
     }
@@ -1795,6 +1815,113 @@ test("uppercases the provided first name", () => {
         assert!(
             result.iter().any(ToolResult::is_warning),
             "mixed run should keep the warning result: {result:?}"
+        );
+    }
+
+    #[test]
+    fn litmus_skips_when_only_tests_live_under_dot_claude_at_any_depth() {
+        // U-001 Red repro: the only test file lives below a package dir inside a
+        // `.claude` tree. Its body is tautological, so before the fix litmus
+        // analyzes it and blocks (a false positive on third-party tooling). After
+        // the fix the `.claude` file is dropped before the is_empty() guard, so
+        // nothing is analyzed and the run skips. The nested path proves the match
+        // is on a `.claude` component at any depth, not a root prefix.
+        let tmp = TempDir::new("litmus-claude-only");
+        let dir = tmp.join("packages/app/.claude/plugins/p");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("bad.test.ts"),
+            r"
+import { test, expect } from 'vitest';
+test('works', () => {
+    expect(true).toBe(true);
+});
+",
+        )
+        .unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: false,
+            has_tsconfig: false,
+        };
+        let result = run_litmus(&project);
+        assert!(
+            result.iter().any(ToolResult::is_skipped),
+            "a .claude-only test tree must skip, not surface a finding: {result:?}"
+        );
+    }
+
+    #[test]
+    fn litmus_reports_real_test_but_not_dot_claude_sibling() {
+        // The filter removes only `.claude` paths; a real src/ test still blocks,
+        // proving the fix does not disable litmus wholesale (guards against an
+        // over-broad filter that drops every file).
+        let tmp = TempDir::new("litmus-claude-sibling");
+        let claude_dir = tmp.join(".claude/plugins/p/src");
+        fs::create_dir_all(&claude_dir).unwrap();
+        fs::write(
+            claude_dir.join("bad.test.ts"),
+            r"
+import { test, expect } from 'vitest';
+test('works', () => {
+    expect(true).toBe(true);
+});
+",
+        )
+        .unwrap();
+        let src = tmp.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("bad.test.ts"),
+            r"
+import { test, expect } from 'vitest';
+test('works', () => {
+    expect(true).toBe(true);
+});
+",
+        )
+        .unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: false,
+            has_tsconfig: false,
+        };
+        let result = run_litmus(&project);
+        assert!(
+            result.iter().any(ToolResult::is_failure),
+            "the real src/ test must still block after filtering .claude: {result:?}"
+        );
+    }
+
+    #[test]
+    fn litmus_excludes_dot_claude_as_exact_component_not_substring() {
+        // `foo.claude` contains the `.claude` substring but is not the exact
+        // component `.claude`. The filter matches whole path components only, so
+        // this file survives and its tautological body blocks. A substring impl
+        // (`contains(".claude")` or `contains("claude")`) would wrongly drop it
+        // and skip; this fixture catches both regressions.
+        let tmp = TempDir::new("litmus-claude-substring");
+        let dir = tmp.join("foo.claude");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("bad.test.ts"),
+            r"
+import { test, expect } from 'vitest';
+test('works', () => {
+    expect(true).toBe(true);
+});
+",
+        )
+        .unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: false,
+            has_tsconfig: false,
+        };
+        let result = run_litmus(&project);
+        assert!(
+            result.iter().any(ToolResult::is_failure),
+            "foo.claude is not the .claude component and must still block: {result:?}"
         );
     }
 
