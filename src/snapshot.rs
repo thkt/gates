@@ -169,7 +169,7 @@ pub fn write(dir: &Path, root: &Path, digest: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::TempDir;
+    use crate::test_utils::{GUARDED_EXCLUDED_DIR_NAMES, TempDir};
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::process::Command;
@@ -397,6 +397,40 @@ mod tests {
         let root = TempDir::new("snap-t020-root");
         let missing = root.join("absent-snapshot-dir");
         assert_eq!(read_stored(&missing, &root), None);
+    }
+
+    // Guard for the EXCLUDED_DIRS consolidation (fixture rationale:
+    // test_utils::GUARDED_EXCLUDED_DIR_NAMES). The kept.ts positive control
+    // also catches a degenerate constant/empty digest.
+    #[test]
+    fn digest_ignores_all_hardcoded_excluded_dirs_but_tracks_control_file() {
+        let root = TempDir::new("snap-all-excluded");
+        let excluded_names = GUARDED_EXCLUDED_DIR_NAMES;
+        for &name in excluded_names {
+            let dir = root.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(format!("{name}.ts")), "x").unwrap();
+        }
+        fs::create_dir_all(root.join("kept")).unwrap();
+        fs::write(root.join("kept/kept.ts"), "x").unwrap();
+
+        let before = compute_digest(&root);
+
+        for &name in excluded_names {
+            fs::write(root.join(name).join(format!("{name}.ts")), "edited").unwrap();
+        }
+        let after_excluded_edit = compute_digest(&root);
+        assert_eq!(
+            before, after_excluded_edit,
+            "edits confined to excluded dirs must not change the digest"
+        );
+
+        fs::write(root.join("kept/kept.ts"), "edited").unwrap();
+        let after_control_edit = compute_digest(&root);
+        assert_ne!(
+            before, after_control_edit,
+            "an edit to the control file outside excluded dirs must change the digest"
+        );
     }
 
     // T-022: a stat-failed file contributes a sentinel rather than being dropped

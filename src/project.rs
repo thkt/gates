@@ -121,7 +121,7 @@ fn is_package_dir(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::TempDir;
+    use crate::test_utils::{GUARDED_EXCLUDED_DIR_NAMES, TempDir};
     use crate::tools::run_graph_gates;
     use std::fs;
 
@@ -312,6 +312,35 @@ mod tests {
             targets.iter().any(|t| t.root == pkg),
             "real packages are still discovered"
         );
+    }
+
+    // Guard for the EXCLUDED_DIRS consolidation (fixture rationale:
+    // test_utils::GUARDED_EXCLUDED_DIR_NAMES). The kept-pkg positive control
+    // also catches a degenerate "excludes everything" implementation.
+    #[test]
+    fn discovery_skips_all_hardcoded_excluded_names_but_keeps_control_pkg() {
+        let tmp = TempDir::new("discovery-all-excluded");
+        fs::create_dir_all(tmp.join(".git")).unwrap();
+        // No root package.json/tsconfig.json/src, so package_targets descends
+        // via discover_packages rather than the single-target short-circuit.
+
+        for &name in GUARDED_EXCLUDED_DIR_NAMES {
+            let dir = tmp.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("package.json"), "{}").unwrap();
+        }
+        let kept = tmp.join("kept-pkg");
+        fs::create_dir_all(&kept).unwrap();
+        fs::write(kept.join("package.json"), "{}").unwrap();
+
+        let targets = ProjectInfo::detect(&tmp).package_targets();
+        assert_eq!(
+            targets.len(),
+            1,
+            "only kept-pkg should be discovered as a target, got {:?}",
+            targets.iter().map(|t| &t.root).collect::<Vec<_>>()
+        );
+        assert_eq!(targets[0].root, kept);
     }
 
     // Claude Code tooling directories (`.claude/plugins/<plugin>` carrying their
