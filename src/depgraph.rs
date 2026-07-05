@@ -286,6 +286,42 @@ mod tests {
         assert_eq!(graph.files.len(), 1);
     }
 
+    // T-109: the remaining 4 hardcoded EXCLUDED_DIRS entries (.git/dist/build/
+    // target) are still excluded from collection, while a sibling control file
+    // is still collected. Removing an entry from EXCLUDED_DIRS makes this fail.
+    #[test]
+    fn excludes_remaining_hardcoded_dirs_but_collects_control_file() {
+        // Intentional duplicate of EXCLUDED_DIRS: kept local so that deleting an
+        // entry from the production list breaks this test instead of silently
+        // shrinking the loop.
+        let excluded_dirs = [".git", "dist", "build", "target"];
+
+        let tmp = TempDir::new("depgraph-excluded-dirs");
+        let src = tmp.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("kept.ts"), "export const kept = 1;\n").unwrap();
+
+        for dir in excluded_dirs {
+            let sub = src.join(dir);
+            fs::create_dir_all(&sub).unwrap();
+            fs::write(sub.join("excluded.ts"), "export const excluded = 1;\n").unwrap();
+        }
+
+        let graph = build(&src);
+        let names: HashSet<&str> = graph
+            .files
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+            .collect();
+        let expected: HashSet<&str> = HashSet::from(["kept.ts"]);
+        assert_eq!(
+            names, expected,
+            "excluded dirs must not contribute files, got {:?}",
+            names
+        );
+        assert!(graph.files.contains(&canon(&src.join("kept.ts"))));
+    }
+
     // T-107: an empty directory yields empty graph data.
     #[test]
     fn empty_directory() {
