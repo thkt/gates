@@ -899,22 +899,64 @@ fn is_unbootstrapped_failure(output: &str) -> bool {
     output.contains("error TS2307:")
 }
 
-/// Reclassify a type gate's blocking `Failed` as an advisory `Warned` when its
-/// failure is an unbootstrapped environment (issue #89), prefixing the distinct
-/// banner and preserving the captured output so the human still sees both via
-/// stderr. Non-failures and real type failures pass through unchanged.
-fn downgrade_if_unbootstrapped(mut result: ToolResult) -> ToolResult {
+/// Shared mechanics for both banner-prefixed downgrades below: reclassify a
+/// blocking `Failed` as an advisory `Warned` when `predicate` matches the
+/// captured text, prefixing `banner` and preserving the original output so the
+/// human still sees both. Non-failures and non-matching failures pass through
+/// unchanged.
+///
+/// Builds the banner-prefixed output by hand rather than via `ToolResult::warned`,
+/// which re-runs `tail_lines` and would drop the prepended banner once the
+/// (already-truncated) text fills the limit.
+fn downgrade_failed_matching(
+    mut result: ToolResult,
+    predicate: impl Fn(&str) -> bool,
+    banner: &str,
+    clear_hint: bool,
+) -> ToolResult {
     if let GateOutcome::Failed(text) = &result.outcome
-        && is_unbootstrapped_failure(text)
+        && predicate(text)
     {
-        // Build the banner-prefixed output by hand rather than via
-        // `ToolResult::warned`, which re-runs `tail_lines` and would drop the
-        // prepended banner once the (already-truncated) text fills the limit.
-        let downgraded = format!("{ENV_NOT_READY_BANNER}\n{text}");
-        result.hint = "";
+        let downgraded = format!("{banner}\n{text}");
+        if clear_hint {
+            result.hint = "";
+        }
         result.outcome = GateOutcome::Warned(downgraded);
     }
     result
+}
+
+/// Reclassify a type gate's blocking `Failed` as an advisory `Warned` when its
+/// failure is an unbootstrapped environment (issue #89). See
+/// `downgrade_failed_matching` for the shared mechanics.
+fn downgrade_if_unbootstrapped(result: ToolResult) -> ToolResult {
+    downgrade_failed_matching(
+        result,
+        is_unbootstrapped_failure,
+        ENV_NOT_READY_BANNER,
+        true,
+    )
+}
+
+/// Distinct banner prepended to a downgraded oxlint result so the human reads
+/// "this is a version/flag mismatch, not a lint violation" as the first advisory
+/// line. Covers both possible causes (oxlint version drift vs. stale args) since
+/// the bpaf usage-error text alone doesn't disambiguate which one applies.
+const OXLINT_USAGE_ERROR_BANNER: &str = "oxlint usage error: an argument was rejected by bpaf's flag parser. \
+     This means either the installed oxlint version no longer accepts a configured flag, \
+     or gates' own args are stale for the installed version. Advisory only — not blocking.";
+
+/// Reclassify oxlint's blocking `Failed` as an advisory `Warned` when the failure is
+/// a bpaf unknown-flag usage error (backtick-quoted flag name followed by "is not
+/// expected in this context"), rather than an actual lint violation. See
+/// `downgrade_failed_matching` for the shared mechanics.
+fn downgrade_oxlint_usage_error(result: ToolResult) -> ToolResult {
+    downgrade_failed_matching(
+        result,
+        |text| text.contains(" is not expected in this context"),
+        OXLINT_USAGE_ERROR_BANNER,
+        false,
+    )
 }
 
 pub fn run_gate(gate: &GateDefinition, project: &ProjectInfo) -> ToolResult {
@@ -932,7 +974,11 @@ pub fn run_gate(gate: &GateDefinition, project: &ProjectInfo) -> ToolResult {
     // no-op there (no per-gate guard needed). The cause is project-level, so sibling
     // gates (depcruise/knip) can independently block on the same missing module; that
     // residual is accepted for #89's scope rather than downgrading every gate.
-    downgrade_if_unbootstrapped(result)
+    result = downgrade_if_unbootstrapped(result);
+    if gate.name == "oxlint" {
+        result = downgrade_oxlint_usage_error(result);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -1260,6 +1306,141 @@ mod tests {
         assert!(
             banner_pos < detail_pos,
             "banner must precede the captured TS2307 detail: {rendered}"
+        );
+    }
+
+    // T-001: bpaf unknown-flag stderr を含む oxlint の Failed は Warned に降格し
+    // banner が先頭に付く。
+    #[test]
+    fn bpaf_unknown_flag_stderr_を含む_oxlint_の_failed_は_warned_に降格し_banner_が先頭に付く() {
+        let failed = ToolResult::failed(
+            "oxlint",
+            "",
+            "Error: `--type-aware` is not expected in this context",
+        );
+        let result = downgrade_oxlint_usage_error(failed);
+        assert!(result.is_warning(), "usage-error failure should downgrade");
+        assert!(
+            result.output().starts_with(OXLINT_USAGE_ERROR_BANNER),
+            "distinct banner must lead the advisory output: {}",
+            result.output()
+        );
+        assert!(
+            result
+                .output()
+                .contains("Error: `--type-aware` is not expected in this context"),
+            "preserves original output: {}",
+            result.output()
+        );
+    }
+
+    // T-002: バッククォート前置パターン非該当の Failed は Failed のまま残る。
+    #[test]
+    fn バッククォート前置パターン非該当の_failed_は_failed_のまま残る() {
+        let text = "src/foo.ts:1:1 error: unexpected `console.log` usage (no-console)";
+        let failed = ToolResult::failed("oxlint", "", text);
+        let result = downgrade_oxlint_usage_error(failed);
+        assert!(result.is_failure(), "non-matching failure must stay Failed");
+        assert_eq!(result.output(), text, "text must remain unchanged");
+    }
+
+    // T-003: oxlint 以外の gate は bpaf パターンを含んでも降格されない
+    // (name ガードが降格を遮断)。
+    #[test]
+    fn oxlint_以外の_gate_は_bpaf_パターンを含んでも降格されない() {
+        let gate = GateDefinition {
+            name: "tsgo",
+            command: "sh",
+            args: &[
+                "-c",
+                "printf 'Error: \\`--type-aware\\` is not expected in this context'; exit 1",
+            ],
+            hint: "",
+            condition: |_| true,
+            per_package: false,
+        };
+        // A real, existing directory is required here (unlike test_project's
+        // `/tmp/nonexistent`): `sh -c ...` actually spawns to produce the Failed
+        // outcome this test inspects, and spawning with a nonexistent
+        // current_dir fails with NotFound, collapsing to Skipped before the
+        // downgrade guard under test ever runs.
+        let tmp = TempDir::new("tsgo-bpaf-guard");
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: true,
+        };
+        let result = run_gate(&gate, &project);
+        assert!(
+            result.is_failure(),
+            "non-oxlint gate must not be downgraded: {:?}",
+            result.outcome
+        );
+    }
+
+    // T-004: Passed / Skipped / Warned の結果は降格処理を素通しする。
+    #[test]
+    fn passed_と_skipped_と_warned_の結果は降格処理を素通しする() {
+        let passed = ToolResult::passed("oxlint");
+        let passed_result = downgrade_oxlint_usage_error(passed);
+        assert!(matches!(passed_result.outcome, GateOutcome::Passed));
+
+        let skipped = ToolResult::skipped("oxlint");
+        let skipped_result = downgrade_oxlint_usage_error(skipped);
+        assert!(matches!(skipped_result.outcome, GateOutcome::Skipped));
+
+        let warned = ToolResult::warned("oxlint", "", "already advisory");
+        let warned_result = downgrade_oxlint_usage_error(warned);
+        assert!(warned_result.is_warning());
+        assert_eq!(warned_result.output(), "already advisory");
+    }
+
+    // T-005: 降格結果は format_summary の advisory block に表示され block 対象に
+    // 数えられない。
+    #[test]
+    fn 降格結果は_format_summary_の_advisory_block_に表示され_block_対象に数えられない() {
+        let failed = ToolResult::failed(
+            "oxlint",
+            "",
+            "Error: `--type-aware` is not expected in this context",
+        );
+        let downgraded = downgrade_oxlint_usage_error(failed);
+        let rendered = strip_ansi(&format_summary(&[downgraded]));
+        assert!(
+            !rendered.contains("BLOCKED"),
+            "downgraded usage-error must not block: {rendered}"
+        );
+        assert!(
+            rendered.contains("advisory warning"),
+            "must render under the advisory section: {rendered}"
+        );
+        assert!(
+            rendered.contains(OXLINT_USAGE_ERROR_BANNER),
+            "banner must appear in the advisory render: {rendered}"
+        );
+    }
+
+    // T-006: per_package fan-out の scoped ラベル付与後も Warned 降格が保たれる
+    // (実行順は降格が先)。
+    #[test]
+    fn per_package_fan_out_の_scoped_ラベル付与後も_warned_降格が保たれる() {
+        let failed = ToolResult::failed(
+            "oxlint",
+            "",
+            "Error: `--type-aware` is not expected in this context",
+        );
+        let downgraded = downgrade_oxlint_usage_error(failed);
+        let scoped = downgraded.scoped("pkg-a");
+        assert!(scoped.is_warning(), "scoped result must stay Warned");
+        assert!(
+            scoped.output().starts_with("[pkg-a]\n"),
+            "scoped label must prefix the output: {}",
+            scoped.output()
+        );
+        assert!(
+            scoped.output().contains(OXLINT_USAGE_ERROR_BANNER),
+            "banner must survive scoping: {}",
+            scoped.output()
         );
     }
 
