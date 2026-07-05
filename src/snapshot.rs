@@ -18,22 +18,11 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Directories whose contents never belong to the gated fileset: dependencies,
-/// VCS, build/test artifacts (`dist`/`build`/`target`/`coverage`/`.next`), and
-/// `.claude` (Claude Code tooling, whose `plugins/<plugin>` sources are
-/// third-party and are also excluded from package discovery at `project.rs`).
-/// Kept in sync with `project.rs::EXCLUDED_DIRS`; `depgraph`'s list is narrower
-/// because it only walks `src/` downward and never reaches these siblings.
-const EXCLUDED_DIRS: &[&str] = &[
-    "node_modules",
-    ".git",
-    "dist",
-    "build",
-    "target",
-    "coverage",
-    ".next",
-    ".claude",
-];
+// Directories whose contents never belong to the gated fileset. Shares the
+// single definition at `project.rs::EXCLUDED_DIRS` so package discovery and the
+// snapshot walk cannot drift; `depgraph`'s list is narrower because it only
+// walks `src/` downward and never reaches these siblings.
+use crate::project::EXCLUDED_DIRS;
 
 /// Source extensions gates consumes (tsc/eslint/embedded gates).
 const SOURCE_EXTS: &[&str] = &["ts", "tsx", "cts", "mts", "js", "jsx", "cjs", "mjs"];
