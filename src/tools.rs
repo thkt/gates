@@ -692,6 +692,27 @@ pub const DEFAULT_JSCPD_IGNORE: &[&str] = &[
     "**/dist/**",
 ];
 
+/// Merges user-configured `jscpd.ignore` globs onto the structural defaults
+/// (#118). The defaults (`.claude/**`, `.git/**`, …) are never-scan targets, so
+/// a user list extends them rather than replacing them; replacing silently
+/// dropped these exclusions. Dedup keeps a user echo of a default from doubling
+/// the glob. Defaults stay first so their ordering is stable regardless of the
+/// user list.
+pub fn merge_jscpd_ignore(user: Option<&[String]>) -> Vec<String> {
+    let mut ignore: Vec<String> = DEFAULT_JSCPD_IGNORE
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    if let Some(user) = user {
+        for glob in user {
+            if !ignore.contains(glob) {
+                ignore.push(glob.clone());
+            }
+        }
+    }
+    ignore
+}
+
 const JSCPD_HINT: &str = "Extract the duplicated code into a shared function or module (DRY).";
 
 /// Subset of jscpd's JSON report the gate reads. `duplicates` and its inner
@@ -979,6 +1000,36 @@ mod tests {
         assert!(
             DEFAULT_JSCPD_IGNORE.contains(&"**/.claude/**"),
             "DEFAULT_JSCPD_IGNORE must exclude .claude by default"
+        );
+    }
+
+    #[test]
+    fn merge_jscpd_ignore_without_user_config_returns_defaults() {
+        assert_eq!(merge_jscpd_ignore(None), DEFAULT_JSCPD_IGNORE.to_vec());
+    }
+
+    #[test]
+    fn merge_jscpd_ignore_extends_defaults_rather_than_replacing() {
+        let user = vec!["**/vendor/**".to_owned()];
+        let merged = merge_jscpd_ignore(Some(&user));
+        // Every structural default survives a user-supplied ignore (#118).
+        for &def in DEFAULT_JSCPD_IGNORE {
+            assert!(
+                merged.contains(&def.to_owned()),
+                "default {def} was dropped"
+            );
+        }
+        assert!(merged.contains(&"**/vendor/**".to_owned()));
+    }
+
+    #[test]
+    fn merge_jscpd_ignore_dedups_user_echo_of_a_default() {
+        let user = vec!["**/.claude/**".to_owned(), "**/vendor/**".to_owned()];
+        let merged = merge_jscpd_ignore(Some(&user));
+        let claude_count = merged.iter().filter(|g| *g == "**/.claude/**").count();
+        assert_eq!(
+            claude_count, 1,
+            "a user echo of a default must not duplicate"
         );
     }
 

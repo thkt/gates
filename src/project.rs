@@ -2,13 +2,16 @@ use crate::traverse;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Directory names package discovery never descends into: dependencies, VCS,
+/// Directory names a downward walk never descends into: dependencies, VCS,
 /// build output, coverage/next caches, and Claude Code tooling cannot own a
-/// first-party package target. Extends the list `depgraph`/`snapshot` apply to
-/// their own downward walks with the cache dirs that commonly hold copied
+/// first-party package target. Covers the cache dirs that commonly hold copied
 /// `package.json` fixtures and `.claude`, whose `plugins/<plugin>` members carry
 /// their own manifests but are third-party tooling, not code to gate.
-const EXCLUDED_DIRS: &[&str] = &[
+///
+/// Single source of truth for the identical exclusion `snapshot` applies to its
+/// own downward walk; `depgraph`'s list is narrower because it only walks `src/`
+/// downward and never reaches these siblings.
+pub const EXCLUDED_DIRS: &[&str] = &[
     "node_modules",
     ".git",
     "dist",
@@ -124,6 +127,15 @@ mod tests {
     use crate::test_utils::{GUARDED_EXCLUDED_DIR_NAMES, TempDir};
     use crate::tools::run_graph_gates;
     use std::fs;
+
+    // Pins the shared production constant to the fixture the behavioral guard
+    // tests (here and in `snapshot`) iterate. Without this, adding a name to
+    // `EXCLUDED_DIRS` without also adding it to `GUARDED_EXCLUDED_DIR_NAMES`
+    // would leave the new exclusion unguarded, and vice versa.
+    #[test]
+    fn excluded_dirs_matches_guarded_fixture() {
+        assert_eq!(EXCLUDED_DIRS, GUARDED_EXCLUDED_DIR_NAMES);
+    }
 
     #[test]
     fn detects_both_files() {

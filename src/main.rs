@@ -277,12 +277,7 @@ fn run_with_overrides(project_dir: &Path, overrides: &tools::EnvOverrides) -> Op
             .threshold
             .unwrap_or(tools::DEFAULT_JSCPD_THRESHOLD);
         let block = config.jscpd.block.unwrap_or(false);
-        let ignore = config.jscpd.ignore.clone().unwrap_or_else(|| {
-            tools::DEFAULT_JSCPD_IGNORE
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect()
-        });
+        let ignore = tools::merge_jscpd_ignore(config.jscpd.ignore.as_deref());
         tasks.push((
             vec!["jscpd"],
             thread::spawn(move || {
