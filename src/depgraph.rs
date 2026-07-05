@@ -166,6 +166,16 @@ mod tests {
         path.canonicalize().unwrap()
     }
 
+    // Pin EXCLUDED_DIRS's exact contents/order so an accidental addition,
+    // removal, or reordering is caught immediately by this single test.
+    #[test]
+    fn excluded_dirs_is_pinned() {
+        assert_eq!(
+            EXCLUDED_DIRS,
+            &["node_modules", ".git", "dist", "build", "target"]
+        );
+    }
+
     // T-101: relative import a -> b records an intra-project edge, no external.
     #[test]
     fn relative_import_records_edge() {
