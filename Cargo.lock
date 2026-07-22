@@ -91,7 +91,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "gates"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "litmus",
  "oxc_allocator",
@@ -151,7 +151,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 [[package]]
 name = "litmus"
 version = "0.3.0"
-source = "git+https://github.com/thkt/litmus.git?rev=aaa8512e7881af27e6e0605b1329520cf60dd50b#aaa8512e7881af27e6e0605b1329520cf60dd50b"
+source = "git+https://github.com/thkt/litmus.git?rev=53940d56f40edeb33698d32cc315df7d79f78fa5#53940d56f40edeb33698d32cc315df7d79f78fa5"
 dependencies = [
  "glob",
  "oxc_allocator",

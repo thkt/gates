@@ -1937,6 +1937,92 @@ describe('math', () => {
         );
     }
 
+    // T-001: import assert from "node:assert/strict" の assert.equal /
+    // assert.deepEqual を使う node:test テストが litmus gate を pass する
+    //
+    // On the currently pinned litmus rev (aaa8512, before thkt/litmus#101's
+    // node:assert fix 0331f81), `assert.equal`/`assert.deepEqual` calls are
+    // recognized as neither an assertion nor an Act call, so
+    // `block.assertions` stays empty and litmus' weak-assertion rule (a
+    // blocking, non-warning-tier rule; see litmus src/rules.rs
+    // `WARNING_RULES`) fires "no assertions" even though the test does
+    // assert. This is a regression guard: it must go green only once
+    // Cargo.toml's litmus rev is bumped to (or past) 53940d5, which carries
+    // 0331f81 as an ancestor.
+    #[test]
+    fn import_assert_from_node_assert_strict_の_assert_equal_assert_deepequal_を使う_node_test_テストが_litmus_gate_を_pass_する()
+     {
+        let tmp = TempDir::new("litmus-node-assert-strict-module");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        fs::create_dir_all(tmp.join("src")).unwrap();
+        fs::write(
+            tmp.join("src/example.test.ts"),
+            r"
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+test('adds two numbers correctly', () => {
+    const result = add(1, 2);
+    assert.equal(result, 3);
+    assert.deepEqual({ sum: result }, { sum: 3 });
+});
+",
+        )
+        .unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_litmus(&project);
+        assert!(
+            !result.iter().any(ToolResult::is_failure),
+            "node:assert/strict assert.equal/assert.deepEqual test should pass: {result:?}"
+        );
+    }
+
+    // T-002: import assert from "node:assert" の assert.strict.equal
+    // 名前空間呼び出しを使うテストが litmus gate を pass する
+    //
+    // On the currently pinned litmus rev (aaa8512), `is_node_assert_call`
+    // does not exist at all (it lands in 0331f81, before the pinned rev),
+    // so the `assert.strict.equal` namespace form is unrecognized the same
+    // way plain `assert.equal` is: weak-assertion fires "no assertions".
+    // Bumping only to 0331f81 (the base node:assert fix, without 53940d5's
+    // strict-namespace support) would still leave this Red, since
+    // `is_node_assert_call` there only matches `assert.<method>` one level
+    // deep, not `assert.strict.<method>`. This is the regression guard for
+    // 53940d5 itself (Closes thkt/litmus#103), the minimum rev after which
+    // this scenario turns Green.
+    #[test]
+    fn import_assert_from_node_assert_の_assert_strict_equal_名前空間呼び出しを使うテストが_litmus_gate_を_pass_する()
+     {
+        let tmp = TempDir::new("litmus-node-assert-strict-namespace");
+        fs::write(tmp.join("package.json"), "{}").unwrap();
+        fs::create_dir_all(tmp.join("src")).unwrap();
+        fs::write(
+            tmp.join("src/example.test.ts"),
+            r"
+import { test } from 'node:test';
+import assert from 'node:assert';
+test('adds two numbers correctly', () => {
+    const result = add(1, 2);
+    assert.strict.equal(result, 3);
+});
+",
+        )
+        .unwrap();
+        let project = ProjectInfo {
+            root: tmp.to_path_buf(),
+            has_package_json: true,
+            has_tsconfig: false,
+        };
+        let result = run_litmus(&project);
+        assert!(
+            !result.iter().any(ToolResult::is_failure),
+            "node:assert assert.strict.equal namespace test should pass: {result:?}"
+        );
+    }
+
     #[test]
     fn litmus_detects_tautological_test() {
         let tmp = TempDir::new("litmus-bad");
