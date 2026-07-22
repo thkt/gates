@@ -1,6 +1,6 @@
 [package]
 name = "gates"
-version = "0.12.1"
+version = "0.12.2"
 edition = "2024"
 description = "Claude Code completion hook for parallel gate execution"
 license = "MIT"
@@ -21,7 +21,7 @@ tempfile = ">=3"
 # floats to the default-branch HEAD on `cargo update`, which is a stability hazard
 # for a per-edit hook, so pin it by rev. The registry crates below (oxc/serde/regex)
 # stay on `>=` ranges; pinning those floats is tracked separately, out of #94 scope.
-litmus = { git = "https://github.com/thkt/litmus.git", rev = "aaa8512e7881af27e6e0605b1329520cf60dd50b" }
+litmus = { git = "https://github.com/thkt/litmus.git", rev = "53940d56f40edeb33698d32cc315df7d79f78fa5" }
 oxc_allocator = ">=0.121"
 oxc_ast = { version = ">=0.121", features = ["serialize"] }
 oxc_parser = ">=0.121"
