@@ -421,17 +421,45 @@ fn analyze_files_on_deep_stack(files: &[PathBuf]) -> litmus::AnalysisResult {
 /// litmus' own `is_excluded` skips node_modules but not `.claude`, so
 /// `find_test_files` still collects third-party Claude Code plugin tests under
 /// `.claude/plugins/*`. Those are not this project's tests, so analyzing them
-/// surfaces false-positive findings on tooling the repo does not own. Match on a
-/// whole path component equal to `.claude` (mirroring litmus `is_excluded`'s
-/// full-path component match and the project.rs / snapshot.rs / jscpd / oxlint
-/// `.claude` convention) so `foo.claude` and the like are not swept up.
-fn without_claude_tests(files: Vec<PathBuf>) -> Vec<PathBuf> {
+/// surfaces false-positive findings on tooling the repo does not own. Match on
+/// a whole path component equal to `.claude`, relative to `root` (mirroring
+/// litmus `is_excluded`'s full-path component match and the project.rs /
+/// snapshot.rs / jscpd / oxlint `.claude` convention) so `foo.claude` and the
+/// like are not swept up, and so a project rooted inside a real `.claude`
+/// path (e.g. this repo's own worktree under `~/.claude`) does not exclude
+/// its own tests just because `root` itself contains a `.claude` component.
+///
+/// When `root` itself *is* a `.claude` directory (a project rooted at
+/// `~/.claude`, e.g. a Claude Code plugin repo), the relative-component match
+/// above cannot see that: `root` is stripped off before matching, so the
+/// `.claude` component never appears in the relative path being tested. That
+/// project's third-party plugin tests live at `<root>/plugins/*` with no
+/// `.claude` component of their own to key on, so this also excludes a
+/// relative path whose first component is `plugins` when `root.file_name()`
+/// is `.claude`.
+///
+/// `root.file_name()` only returns `Some` for a path with a real trailing
+/// component (e.g. an absolute path), so this second condition fires when
+/// `root` is invoked as an absolute path and never fires for a relative
+/// root like `.` (a no-argument / cwd-relative invocation): `Path::new(".")
+/// .file_name()` is `None`. A `.` root still gets the plugins exclusion
+/// indirectly whenever a `.claude` component survives into the relative
+/// path (e.g. `./.claude/plugins/...`), just not through this branch.
+fn without_claude_tests(files: Vec<PathBuf>, root: &Path) -> Vec<PathBuf> {
+    let root_is_claude_dir = root.file_name().and_then(|name| name.to_str()) == Some(".claude");
     files
         .into_iter()
         .filter(|path| {
-            !path
+            let relative = path.strip_prefix(root).unwrap_or(path);
+            let has_claude_component = relative
                 .components()
-                .any(|c| c.as_os_str().to_str() == Some(".claude"))
+                .any(|c| c.as_os_str().to_str() == Some(".claude"));
+            let under_plugins_of_claude_root = root_is_claude_dir
+                && relative
+                    .components()
+                    .next()
+                    .is_some_and(|c| c.as_os_str().to_str() == Some("plugins"));
+            !(has_claude_component || under_plugins_of_claude_root)
         })
         .collect()
 }
@@ -446,7 +474,7 @@ pub fn run_litmus(project: &ProjectInfo) -> Vec<ToolResult> {
     // root-manifest-less layout (members own the manifests) skipped every test
     // despite owning real ones (#106). The `.claude`-excluded test-file walk is
     // the actual precondition, so let its emptiness be the skip condition.
-    let files = without_claude_tests(litmus::find_test_files(&project.root));
+    let files = without_claude_tests(litmus::find_test_files(&project.root), &project.root);
     if files.is_empty() {
         return vec![ToolResult::skipped("litmus")];
     }
@@ -2240,6 +2268,154 @@ test('works', () => {
         assert!(
             result.iter().any(ToolResult::is_failure),
             "foo.claude is not the .claude component and must still block: {result:?}"
+        );
+    }
+
+    // U-003 (seam): `find_root` resolves a repo rooted at `~/.claude` (a
+    // Claude Code plugin repo whose `.git` sits directly inside a `.claude`
+    // directory) to that `.claude` directory itself as `ProjectInfo.root`.
+    // These exercise `run_litmus` end to end — real litmus analysis, real
+    // TempDir files — against that root shape, not `without_claude_tests` in
+    // isolation, to prove the root-is-`.claude` branch is actually reachable
+    // through the gate entry point and not just correct in a unit test.
+
+    // T-007: .claude を root とするプロジェクトの src 配下の tautological
+    // テストで litmus が failure を返す
+    #[test]
+    fn dot_claude_を_root_とするプロジェクトの_src_配下の_tautological_テストで_litmus_が_failure_を返す()
+     {
+        let tmp = TempDir::new("litmus-claude-root-src");
+        let claude_root = tmp.join(".claude");
+        let src = claude_root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("bad.test.ts"),
+            r"
+import { test, expect } from 'vitest';
+test('works', () => {
+    expect(true).toBe(true);
+});
+",
+        )
+        .unwrap();
+        let project = ProjectInfo {
+            root: claude_root,
+            has_package_json: false,
+            has_tsconfig: false,
+        };
+        let result = run_litmus(&project);
+        assert!(
+            result.iter().any(ToolResult::is_failure),
+            ".claude 自身が root のときも src/ 配下の tautological テストは block すべき: {result:?}"
+        );
+    }
+
+    // T-008: .claude を root とするプロジェクトの plugins 配下のみに
+    // tautological テストがある場合 litmus が skipped を返す
+    #[test]
+    fn dot_claude_を_root_とするプロジェクトの_plugins_配下のみに_tautological_テストがある場合_litmus_が_skipped_を返す()
+     {
+        let tmp = TempDir::new("litmus-claude-root-plugins");
+        let claude_root = tmp.join(".claude");
+        let plugin = claude_root.join("plugins/p/src");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("bad.test.ts"),
+            r"
+import { test, expect } from 'vitest';
+test('works', () => {
+    expect(true).toBe(true);
+});
+",
+        )
+        .unwrap();
+        let project = ProjectInfo {
+            root: claude_root,
+            has_package_json: false,
+            has_tsconfig: false,
+        };
+        let result = run_litmus(&project);
+        assert!(
+            result.iter().any(ToolResult::is_skipped),
+            ".claude 自身が root のとき plugins 配下のみの tautological テストは skip すべき: {result:?}"
+        );
+    }
+
+    // U-001: without_claude_tests gains a root param. The match is on
+    // root-relative path components equal to `.claude`, or (when root itself is
+    // a `.claude` dir, e.g. a project rooted at `~/.claude`) on a relative path
+    // whose first component is `plugins`, mirroring the third-party layout
+    // `<claude-dir>/plugins/*` without a `.claude` component to key on.
+
+    #[test]
+    fn root_のパスが_claude_で終わる場合でも_root_配下自身のテストファイルは保持される() {
+        let root = PathBuf::from("/repo/.claude");
+        let file = root.join("self.test.js");
+        let kept = without_claude_tests(vec![file.clone()], &root);
+        assert_eq!(
+            kept,
+            vec![file],
+            "root自身直下のテストファイルは保持されるべき"
+        );
+    }
+
+    #[test]
+    fn 通常の_root_では_claude_サブツリー配下のテストファイルが除外される() {
+        let root = PathBuf::from("/repo");
+        let file = root.join(".claude/plugins/foo/foo.test.js");
+        let kept = without_claude_tests(vec![file], &root);
+        assert!(kept.is_empty(), ".claude サブツリー配下は除外されるべき");
+    }
+
+    #[test]
+    fn root_のパスが_claude_で終わる場合_plugins_配下のテストファイルは除外される() {
+        let root = PathBuf::from("/repo/.claude");
+        let file = root.join("plugins/foo/foo.test.js");
+        let kept = without_claude_tests(vec![file], &root);
+        assert!(
+            kept.is_empty(),
+            "root が .claude 自身のとき plugins 配下は除外されるべき"
+        );
+    }
+
+    #[test]
+    fn 相対_root_dot_では自身のテストファイルが保持され_dot_claude_配下は除外される() {
+        let root = PathBuf::from(".");
+        let self_file = root.join("self.test.js");
+        let claude_file = root.join(".claude/plugins/foo/foo.test.js");
+        let kept = without_claude_tests(vec![self_file.clone(), claude_file], &root);
+        assert_eq!(
+            kept,
+            vec![self_file],
+            "相対 root \".\" でも自身のテストは保持され ./.claude 配下は除外されるべき"
+        );
+    }
+
+    // U-002: strip_prefix が失敗する root 外パス (root の配下にない絶対パス) は
+    // 従来の絶対パス component マッチに fallback する。除外側に倒し block を
+    // 増やさない (T-005) が、.claude 類似名 component は除外しない従来挙動も
+    // 保つ (T-006)。
+
+    #[test]
+    fn root_外のパスは絶対パスの_claude_component_一致で除外される() {
+        let root = PathBuf::from("/repo/src");
+        let file = PathBuf::from("/other/.claude/plugins/foo/foo.test.js");
+        let kept = without_claude_tests(vec![file], &root);
+        assert!(
+            kept.is_empty(),
+            "root 外パスでも絶対パスの .claude component 一致で除外されるべき"
+        );
+    }
+
+    #[test]
+    fn foo_claude_のような類似名_component_配下のテストファイルは保持される() {
+        let root = PathBuf::from("/repo/src");
+        let file = PathBuf::from("/other/foo.claude/bad.test.js");
+        let kept = without_claude_tests(vec![file.clone()], &root);
+        assert_eq!(
+            kept,
+            vec![file],
+            "foo.claude は .claude component と完全一致しないため保持されるべき"
         );
     }
 
