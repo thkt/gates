@@ -21,7 +21,7 @@ tempfile = ">=3"
 # floats to the default-branch HEAD on `cargo update`, which is a stability hazard
 # for a per-edit hook, so pin it by rev. The registry crates below (oxc/serde/regex)
 # stay on `>=` ranges; pinning those floats is tracked separately, out of #94 scope.
-litmus = { git = "https://github.com/thkt/litmus.git", rev = "53940d56f40edeb33698d32cc315df7d79f78fa5" }
+litmus = { git = "https://github.com/thkt/litmus.git", rev = "8402bd5518f09b1e4bbdbc5a0495ff91b23e7081" }
 oxc_allocator = ">=0.121"
 oxc_ast = { version = ">=0.121", features = ["serialize"] }
 oxc_parser = ">=0.121"
